@@ -1,0 +1,2413 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Pin Inspector Web Pro 2.0 API",
+    "version": "2.0.0",
+    "description": "Comprehensive REST API specification for Pin Inspector Web Pro 2.0 - Reverse-Engineered Pinterest Desktop Application Intelligence Suite.\n\nCovers all backend endpoints for keywords generation, pins analysis, boards extraction, creator profiling, annotations mining, trend intelligence, and rank tracking.",
+    "contact": {
+      "name": "Pin Inspector Web Pro 2.0 Support",
+      "url": "http://localhost:3000"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Local Pin Inspector Backend Server"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Session & System",
+      "description": "Pinterest session cookie management, connection health, and CORS media proxying"
+    },
+    {
+      "name": "Keywords Generator",
+      "description": "A-Z keyword suggestions, alphabet tree mining, and Keywords Everywhere search volume enrichment"
+    },
+    {
+      "name": "Pins Analyzer",
+      "description": "Live search, category extraction, single pin scraping, and high-concurrency batch metadata scraping"
+    },
+    {
+      "name": "Top Pins",
+      "description": "Discover and analyze the top popular reference Pins (Top 9 Pins) from Pinterest Trends with resolved numeric Pin IDs, visual hashes, and repin engagement"
+    },
+    {
+      "name": "Boards Analyzer",
+      "description": "Pinterest board discovery, follower metrics, section inspection, and board-pin bulk extraction"
+    },
+    {
+      "name": "People / Accounts",
+      "description": "Creator account search, profile intelligence, user-board extraction, and user pins scraping"
+    },
+    {
+      "name": "Pin Annotations",
+      "description": "Guided search annotation tags discovery, reverse annotation mining from pins/keywords, and database management"
+    },
+    {
+      "name": "Pinterest Trends",
+      "description": "Official Pinterest trends discovery, 52-week historical curves, latest trending topics, and top 9 pins per trend"
+    },
+    {
+      "name": "Position Tracker",
+      "description": "Pin rank tracking and SERP position monitoring across keywords, guided annotations, and countries"
+    }
+  ],
+  "paths": {
+    "/api-docs": {
+      "get": {
+        "tags": [
+          "Session & System"
+        ],
+        "summary": "Interactive Swagger UI Documentation",
+        "description": "HTML user interface rendering the interactive Swagger / OpenAPI API documentation.",
+        "responses": {
+          "200": {
+            "description": "HTML page with interactive Swagger UI",
+            "content": {
+              "text/html": {}
+            }
+          }
+        }
+      }
+    },
+    "/api-docs/swagger.json": {
+      "get": {
+        "tags": [
+          "Session & System"
+        ],
+        "summary": "OpenAPI Specification JSON",
+        "description": "Returns the complete machine-readable OpenAPI 3.0 specification for Pin Inspector Web Pro 2.0.",
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.0 JSON specification",
+            "content": {
+              "application/json": {}
+            }
+          }
+        }
+      }
+    },
+    "/api/session": {
+      "get": {
+        "tags": [
+          "Session & System"
+        ],
+        "summary": "Get Pinterest Session Status",
+        "description": "Checks the active Pinterest session, CSRF token status, cookie length, and custom cookie status.",
+        "responses": {
+          "200": {
+            "description": "Active session status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "connected": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "isCustom": {
+                      "type": "boolean",
+                      "example": false
+                    },
+                    "hasCsrf": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "cookieLength": {
+                      "type": "integer",
+                      "example": 313
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Session & System"
+        ],
+        "summary": "Update Pinterest Cookies",
+        "description": "Configure custom authenticated Pinterest cookies or pass empty string to reset to automatic anonymous session.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "cookies": {
+                    "type": "string",
+                    "description": "Raw cookie string copied from Pinterest browser session"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session configuration result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "message": {
+                      "type": "string",
+                      "example": "Custom Pinterest cookies updated successfully"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/proxy-image": {
+      "get": {
+        "tags": [
+          "Session & System"
+        ],
+        "summary": "Proxy Pinterest CDN Image",
+        "description": "Bypasses browser CORS restrictions by streaming the requested Pinterest image with attachment download headers.",
+        "parameters": [
+          {
+            "name": "url",
+            "in": "query",
+            "required": true,
+            "description": "Original pinimg.com image URL",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Binary image stream (JPEG/PNG)",
+            "content": {
+              "image/jpeg": {},
+              "image/png": {}
+            }
+          },
+          "400": {
+            "description": "Invalid or unauthorized image URL"
+          }
+        }
+      }
+    },
+    "/api/keywords": {
+      "get": {
+        "tags": [
+          "Keywords Generator"
+        ],
+        "summary": "Generate Keyword Suggestions",
+        "description": "Queries Pinterest autocomplete typeahead API using recursive alphabet and digit exploration (a-z, 0-9).",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "description": "Seed keyword(s), comma-separated for bulk seeds",
+            "schema": {
+              "type": "string",
+              "example": "ikea hacks, home decor"
+            }
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "description": "Keyword generation mode: after (seed + a-z), before (a-z + seed), both (combinations), or exact (seed alone)",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "after",
+                "before",
+                "both",
+                "exact"
+              ],
+              "default": "after"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of discovered keyword suggestions with rank and word counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "seed": {
+                      "type": "string",
+                      "example": "ikea hacks"
+                    },
+                    "total": {
+                      "type": "integer",
+                      "example": 150
+                    },
+                    "keywords": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "keyword": {
+                            "type": "string",
+                            "example": "ikea hacks bedroom"
+                          },
+                          "seed": {
+                            "type": "string",
+                            "example": "ikea hacks"
+                          },
+                          "rank": {
+                            "type": "integer",
+                            "example": 1
+                          },
+                          "charCount": {
+                            "type": "integer",
+                            "example": 18
+                          },
+                          "wordCount": {
+                            "type": "integer",
+                            "example": 3
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Query is required"
+          }
+        }
+      }
+    },
+    "/api/keywords-everywhere": {
+      "post": {
+        "tags": [
+          "Keywords Generator"
+        ],
+        "summary": "Enrich Keywords with Search Volume (Keywords Everywhere)",
+        "description": "Fetches monthly search volume, cost per click (CPC), and competition index for a list of keywords.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "keywords": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "example": [
+                      "ikea hacks",
+                      "ikea bedroom"
+                    ]
+                  },
+                  "country": {
+                    "type": "string",
+                    "default": "us"
+                  },
+                  "currency": {
+                    "type": "string",
+                    "default": "usd"
+                  },
+                  "dataSource": {
+                    "type": "string",
+                    "default": "gkp"
+                  }
+                },
+                "required": [
+                  "keywords"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Keyword metrics enrichment data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "keyword": {
+                            "type": "string"
+                          },
+                          "vol": {
+                            "type": "integer",
+                            "example": 22200
+                          },
+                          "cpc": {
+                            "type": "object",
+                            "properties": {
+                              "value": {
+                                "type": "string",
+                                "example": "0.85"
+                              }
+                            }
+                          },
+                          "competition": {
+                            "type": "number",
+                            "example": 0.35
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pins": {
+      "get": {
+        "tags": [
+          "Pins Analyzer"
+        ],
+        "summary": "Search Pins",
+        "description": "Searches Pinterest pins by keyword query with support for pagination bookmarks and Server-Sent Events (SSE) streaming.",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "description": "Search term or phrase",
+            "schema": {
+              "type": "string",
+              "example": "craft room ideas"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "description": "Target number of pins to retrieve",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          },
+          {
+            "name": "searchIn",
+            "in": "query",
+            "description": "Filter by content type ('all' or 'videos')",
+            "schema": {
+              "type": "string",
+              "default": "all"
+            }
+          },
+          {
+            "name": "stream",
+            "in": "query",
+            "description": "Set to true to stream pins progressively via Server-Sent Events",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "aiFilter",
+            "in": "query",
+            "description": "Filter pins by Artificial Intelligence status: 'all' (default), 'ai-only' (only AI-generated / AI-modified pins), or 'human-only' (only authentic human/organic pins)",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "ai-only",
+                "human-only"
+              ],
+              "default": "all"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Collection of matching Pinterest pins",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer"
+                    },
+                    "pins": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PinItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Query is required"
+          }
+        }
+      }
+    },
+    "/api/pins/category": {
+      "get": {
+        "tags": [
+          "Pins Analyzer"
+        ],
+        "summary": "Extract Pins by Category",
+        "description": "Fetches top pins for specific official Pinterest categories.",
+        "parameters": [
+          {
+            "name": "categories",
+            "in": "query",
+            "required": true,
+            "description": "Comma-separated category names (e.g. 'home_decor,art,diy_and_crafts')",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          },
+          {
+            "name": "stream",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Category pins collection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pins": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PinItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/scrape-pin": {
+      "get": {
+        "tags": [
+          "Pins Analyzer"
+        ],
+        "summary": "Scrape Single Pin Metadata",
+        "description": "Scrapes extended real-time data for a single pin ID, including comments count, repin count, dominant colors, and creator bio.",
+        "parameters": [
+          {
+            "name": "pinId",
+            "in": "query",
+            "required": true,
+            "description": "Pinterest numeric pin ID or full URL",
+            "schema": {
+              "type": "string",
+              "example": "123456789012345678"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detailed pin data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PinDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/scrape-pins-batch": {
+      "post": {
+        "tags": [
+          "Pins Analyzer"
+        ],
+        "summary": "Batch Scrape Multiple Pins",
+        "description": "Concurrently scrapes detailed metadata for an array of pin IDs with controlled parallelism.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "pinIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "concurrency": {
+                    "type": "integer",
+                    "default": 5
+                  }
+                },
+                "required": [
+                  "pinIds"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Map of pin ID to scraped detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PinDetail"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/boards": {
+      "get": {
+        "tags": [
+          "Boards Analyzer"
+        ],
+        "summary": "Search Boards",
+        "description": "Searches public Pinterest boards matching a keyword query, returning follower counts, pin counts, and cover images.",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "description": "Search keyword for boards",
+            "schema": {
+              "type": "string",
+              "example": "boho living room"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "description": "Target board count or 'all'",
+            "schema": {
+              "type": "string",
+              "default": "50"
+            }
+          },
+          {
+            "name": "bookmark",
+            "in": "query",
+            "description": "Pagination cursor bookmark",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of matching boards",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "boards": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/BoardItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/board-pins": {
+      "get": {
+        "tags": [
+          "Boards Analyzer"
+        ],
+        "summary": "Extract All Pins from a Board",
+        "description": "Fetches all individual pins contained inside a specific board ID.",
+        "parameters": [
+          {
+            "name": "boardId",
+            "in": "query",
+            "required": true,
+            "description": "Pinterest board ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "50"
+            }
+          },
+          {
+            "name": "stream",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pins from the board",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pins": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PinItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users": {
+      "get": {
+        "tags": [
+          "People / Accounts"
+        ],
+        "summary": "Search Creators / User Profiles",
+        "description": "Finds Pinterest user profiles matching a search query, including follower counts, verified status, and bios.",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "description": "User handle or niche query",
+            "schema": {
+              "type": "string",
+              "example": "minimalist wardrobe"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          },
+          {
+            "name": "bookmark",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching Pinterest user accounts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "users": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/UserItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/user-pins": {
+      "get": {
+        "tags": [
+          "People / Accounts"
+        ],
+        "summary": "Get Pins Created/Saved by User",
+        "description": "Extracts pins published or curated by a specific username.",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "example": "joycho"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "50"
+            }
+          },
+          {
+            "name": "stream",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User pins collection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pins": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PinItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/batch-user-pins": {
+      "post": {
+        "tags": [
+          "People / Accounts"
+        ],
+        "summary": "Bulk Scrape Pins for Multiple Users",
+        "description": "Fetches pins across multiple creators in a single batch operation.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "usernames": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "countPerUser": {
+                    "type": "integer",
+                    "default": 20
+                  }
+                },
+                "required": [
+                  "usernames"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Aggregated user pins",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pins": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PinItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/user-boards": {
+      "get": {
+        "tags": [
+          "People / Accounts"
+        ],
+        "summary": "Get Public Boards of a User",
+        "description": "Lists all public boards created by a specific user handle.",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "50"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User's public boards",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "boards": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/BoardItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/annotations/search": {
+      "get": {
+        "tags": [
+          "Pin Annotations"
+        ],
+        "summary": "Search Guided Search Annotations",
+        "description": "Fetches Pinterest official guided search annotation tags for a query.",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "example": "halloween costumes"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Guided search tags",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "annotations": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AnnotationItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/annotations/from-pins": {
+      "post": {
+        "tags": [
+          "Pin Annotations"
+        ],
+        "summary": "Extract Annotations from Pins Array",
+        "description": "Reverse-engineers annotation tags and dominant themes from a set of pins.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "pins": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/PinItem"
+                    }
+                  }
+                },
+                "required": [
+                  "pins"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Extracted annotation terms",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "annotations": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AnnotationItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/annotations/from-keywords": {
+      "post": {
+        "tags": [
+          "Pin Annotations"
+        ],
+        "summary": "Mine Annotations from Keywords",
+        "description": "Extracts guided search annotation pills for a list of seed keywords.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "keywords": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "keywords"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Discovered annotations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "annotations": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AnnotationItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/annotations/related": {
+      "post": {
+        "tags": [
+          "Keywords Generator",
+          "Pin Annotations"
+        ],
+        "summary": "Get Related Keywords (SEO Related Interests)",
+        "description": "Expands seed keywords into related search interests using Pinterest's InterestResource (seo_related_interests). Supports input as an array of keyword strings (e.g. ['home decor']), an array of annotation objects, or a single term string.",
+        "requestBody": {
+          "description": "Selected annotation items, keyword strings array, or single term",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "example": "home decor"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "annotation": {
+                              "type": "string",
+                              "example": "home decor"
+                            },
+                            "categoryTreeLinks": {
+                              "type": "string",
+                              "example": "https://www.pinterest.com/ideas/home-decor/"
+                            },
+                            "url": {
+                              "type": "string",
+                              "example": "/ideas/home-decor/"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "description": "Array of keyword strings or annotation objects with category links"
+                  },
+                  "keywords": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Direct list of keyword strings to expand",
+                    "example": [
+                      "home decor",
+                      "kitchen organization"
+                    ]
+                  },
+                  "term": {
+                    "type": "string",
+                    "description": "Single keyword string to expand",
+                    "example": "home decor"
+                  }
+                },
+                "example": {
+                  "items": [
+                    "home decor"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Enriched keywords list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "example": 12
+                    },
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/InterestKeywordItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No items or keywords selected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "example": "No items selected"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/annotations/additions": {
+      "post": {
+        "tags": [
+          "Keywords Generator",
+          "Pin Annotations"
+        ],
+        "summary": "Get Additional Keywords (Ideas KLP Pivots)",
+        "description": "Discovers deeper sub-interest pivots and additional keywords using Pinterest's InterestResource (ideas_klp_pivots). Supports input as an array of keyword strings, annotation objects, or a single term string.",
+        "requestBody": {
+          "description": "Selected annotation items, keyword strings array, or single term",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "example": "home decor"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "annotation": {
+                              "type": "string",
+                              "example": "home decor"
+                            },
+                            "categoryTreeLinks": {
+                              "type": "string",
+                              "example": "https://www.pinterest.com/ideas/home-decor/"
+                            },
+                            "url": {
+                              "type": "string",
+                              "example": "/ideas/home-decor/"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "description": "Array of keyword strings or annotation objects with category links"
+                  },
+                  "keywords": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Direct list of keyword strings to expand",
+                    "example": [
+                      "home decor",
+                      "kitchen organization"
+                    ]
+                  },
+                  "term": {
+                    "type": "string",
+                    "description": "Single keyword string to expand",
+                    "example": "home decor"
+                  }
+                },
+                "example": {
+                  "items": [
+                    "home decor"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Enriched keywords list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "example": 12
+                    },
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/InterestKeywordItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No items or keywords selected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "example": "No items selected"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/annotations": {
+      "get": {
+        "tags": [
+          "Pin Annotations"
+        ],
+        "summary": "Get Stored Annotations",
+        "description": "Retrieves the saved collection of annotations.",
+        "responses": {
+          "200": {
+            "description": "All stored annotations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "annotations": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AnnotationItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/trends": {
+      "get": {
+        "tags": [
+          "Pinterest Trends"
+        ],
+        "summary": "Pinterest Trends Redirector",
+        "description": "Redirects to /api/trends/generate if query is provided, or /api/trends/latest otherwise.",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "US"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirects to generate or latest"
+          }
+        }
+      }
+    },
+    "/api/trends/generate": {
+      "get": {
+        "tags": [
+          "Pinterest Trends"
+        ],
+        "summary": "Generate Trends for Seed Phrase",
+        "description": "Generates trend curves, normalized interest volume, and related trending concepts for a seed term.",
+        "parameters": [
+          {
+            "name": "phrase",
+            "in": "query",
+            "required": true,
+            "description": "Seed keyword or search phrase",
+            "schema": {
+              "type": "string",
+              "example": "fall fashion"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "US"
+            }
+          },
+          {
+            "name": "stream",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trend discovery results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "trends": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TrendItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/trends/latest": {
+      "get": {
+        "tags": [
+          "Pinterest Trends"
+        ],
+        "summary": "Get Latest Trending Topics",
+        "description": "Retrieves the official top trending keywords and rising topics on Pinterest for the given country.",
+        "parameters": [
+          {
+            "name": "country",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "US"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Top current trending topics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "date": {
+                      "type": "string",
+                      "example": "2026-10-06"
+                    },
+                    "trends": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TrendItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/trends/import": {
+      "post": {
+        "tags": [
+          "Pinterest Trends"
+        ],
+        "summary": "Import Custom Keywords into Trends",
+        "description": "Looks up Pinterest trends historical metrics for a custom list of keywords.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "keywords": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "country": {
+                    "type": "string",
+                    "default": "US"
+                  }
+                },
+                "required": [
+                  "keywords"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Imported trends analytics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "trends": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TrendItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/top-pins": {
+      "get": {
+        "tags": [
+          "Top Pins",
+          "Pins Analyzer"
+        ],
+        "summary": "Get Top Pins (Popular 9 Pins for Keyword)",
+        "description": "Direct alias for retrieving the top 9 popular reference Pins (Top Pins) for any search keyword or trending phrase, including resolved numeric Pin IDs, repin counts, and saves.",
+        "parameters": [
+          {
+            "name": "term",
+            "in": "query",
+            "required": true,
+            "description": "Keyword term or phrase to extract top pins for (e.g. 'ikea hacks', 'home decor')",
+            "schema": {
+              "type": "string",
+              "example": "ikea hacks"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "description": "Two-letter country code (e.g. US, GB, CA)",
+            "schema": {
+              "type": "string",
+              "default": "US"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Top Pins list with resolved Pin IDs and engagement metrics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "term": {
+                      "type": "string",
+                      "example": "ikea hacks"
+                    },
+                    "pins": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PinItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Term is required"
+          }
+        }
+      }
+    },
+    "/api/trends/top-pins": {
+      "get": {
+        "tags": [
+          "Top Pins",
+          "Pinterest Trends"
+        ],
+        "summary": "Get Top 9 Pins for Trending Term",
+        "description": "Retrieves the exact 9 popular reference pins (Top Pins) directly from the Pinterest Trends term_images service with resolved visual hashes and numeric Pin IDs.",
+        "parameters": [
+          {
+            "name": "term",
+            "in": "query",
+            "required": true,
+            "description": "Trending keyword term",
+            "schema": {
+              "type": "string",
+              "example": "pumpkin decor"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "US"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Top 9 trending pins",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "term": {
+                      "type": "string"
+                    },
+                    "pins": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PinItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/trend-history": {
+      "get": {
+        "tags": [
+          "Pinterest Trends"
+        ],
+        "summary": "Get 52-Week Trend History Graph",
+        "description": "Retrieves the complete weekly historical trend curve coordinates (52 data points) for a keyword.",
+        "parameters": [
+          {
+            "name": "term",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "US"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "52-week historical trend curve data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "term": {
+                      "type": "string"
+                    },
+                    "points": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "date": {
+                            "type": "string"
+                          },
+                          "value": {
+                            "type": "number"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pin/position": {
+      "get": {
+        "tags": [
+          "Position Tracker"
+        ],
+        "summary": "Check Pin SERP Rank Position",
+        "description": "Searches Pinterest for a target keyword and finds the exact numeric position / rank of a specific pin ID.",
+        "parameters": [
+          {
+            "name": "pinId",
+            "in": "query",
+            "required": true,
+            "description": "Target Pin ID or mobile pin.it link",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "keyword",
+            "in": "query",
+            "required": true,
+            "description": "Target search keyword",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "annotation",
+            "in": "query",
+            "description": "Optional guided search annotation modifier",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "US"
+            }
+          },
+          {
+            "name": "maxDepth",
+            "in": "query",
+            "description": "Maximum search depth (up to 500 pins)",
+            "schema": {
+              "type": "integer",
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pin rank tracking result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pinId": {
+                      "type": "string"
+                    },
+                    "keyword": {
+                      "type": "string"
+                    },
+                    "found": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "position": {
+                      "type": "integer",
+                      "example": 7
+                    },
+                    "totalScanned": {
+                      "type": "integer",
+                      "example": 50
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/related-keywords": {
+      "post": {
+        "tags": [
+          "Keywords Generator",
+          "Pin Annotations"
+        ],
+        "summary": "Get Related Keywords (Alias for /api/annotations/related)",
+        "description": "Direct alias for /api/annotations/related. Expands seed keywords into related search interests using Pinterest's InterestResource (seo_related_interests). Supports input as an array of keyword strings, annotation objects, or a single term string.",
+        "requestBody": {
+          "description": "Selected annotation items, keyword strings array, or single term",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "example": "home decor"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "annotation": {
+                              "type": "string",
+                              "example": "home decor"
+                            },
+                            "categoryTreeLinks": {
+                              "type": "string",
+                              "example": "https://www.pinterest.com/ideas/home-decor/"
+                            },
+                            "url": {
+                              "type": "string",
+                              "example": "/ideas/home-decor/"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "description": "Array of keyword strings or annotation objects with category links"
+                  },
+                  "keywords": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Direct list of keyword strings to expand",
+                    "example": [
+                      "home decor",
+                      "kitchen organization"
+                    ]
+                  },
+                  "term": {
+                    "type": "string",
+                    "description": "Single keyword string to expand",
+                    "example": "home decor"
+                  }
+                },
+                "example": {
+                  "items": [
+                    "home decor"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Enriched keywords list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "example": 12
+                    },
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/InterestKeywordItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No items or keywords selected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "example": "No items selected"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/additional-keywords": {
+      "post": {
+        "tags": [
+          "Keywords Generator",
+          "Pin Annotations"
+        ],
+        "summary": "Get Additional Keywords (Alias for /api/annotations/additions)",
+        "description": "Direct alias for /api/annotations/additions. Discovers deeper sub-interest pivots and additional keywords using Pinterest's InterestResource (ideas_klp_pivots). Supports input as an array of keyword strings, annotation objects, or a single term string.",
+        "requestBody": {
+          "description": "Selected annotation items, keyword strings array, or single term",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "example": "home decor"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "annotation": {
+                              "type": "string",
+                              "example": "home decor"
+                            },
+                            "categoryTreeLinks": {
+                              "type": "string",
+                              "example": "https://www.pinterest.com/ideas/home-decor/"
+                            },
+                            "url": {
+                              "type": "string",
+                              "example": "/ideas/home-decor/"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "description": "Array of keyword strings or annotation objects with category links"
+                  },
+                  "keywords": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Direct list of keyword strings to expand",
+                    "example": [
+                      "home decor",
+                      "kitchen organization"
+                    ]
+                  },
+                  "term": {
+                    "type": "string",
+                    "description": "Single keyword string to expand",
+                    "example": "home decor"
+                  }
+                },
+                "example": {
+                  "items": [
+                    "home decor"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Enriched keywords list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "example": 12
+                    },
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/InterestKeywordItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No items or keywords selected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "example": "No items selected"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pin/ai-status": {
+      "get": {
+        "tags": [
+          "Pins Analyzer"
+        ],
+        "summary": "Detect AI-Modified or AI-Generated Status for a Pin",
+        "description": "Inspects a Pinterest Pin to determine whether it is AI-generated (Midjourney, DALL-E, Stable Diffusion) or AI-modified (e.g. Photoshop GenAI fill) using Pinterest IPTC digital_media_source_type platform flags, creator hashtag disclosures (#aiart), and visual AI annotations.",
+        "parameters": [
+          {
+            "name": "pinId",
+            "in": "query",
+            "required": true,
+            "description": "Pinterest numeric Pin ID or full Pin URL",
+            "schema": {
+              "type": "string",
+              "example": "592293788530440959"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "AI detection analysis result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pinId": {
+                      "type": "string",
+                      "example": "592293788530440959"
+                    },
+                    "title": {
+                      "type": "string",
+                      "example": "AI-портрет в Midjourney"
+                    },
+                    "isAiModified": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "aiType": {
+                      "type": "string",
+                      "enum": [
+                        "AI Generated",
+                        "AI Modified",
+                        "AI Disclosed",
+                        "AI Annotated",
+                        "NO"
+                      ],
+                      "example": "AI Generated"
+                    },
+                    "aiConfidence": {
+                      "type": "string",
+                      "example": "High"
+                    },
+                    "aiSource": {
+                      "type": "string",
+                      "example": "IPTC trainedAlgorithmicMedia (Platform Verified)"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "Is AI Modified": {
+                          "type": "string",
+                          "example": "YES"
+                        },
+                        "hashtags": {
+                          "type": "string",
+                          "example": "#aiart,#midjourney"
+                        },
+                        "domain": {
+                          "type": "string",
+                          "example": "Uploaded by user"
+                        },
+                        "annotations": {
+                          "type": "string",
+                          "example": "ai art, digital art"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing pinId parameter"
+          },
+          "404": {
+            "description": "Pin not found"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PinItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "771804454924719041"
+          },
+          "title": {
+            "type": "string",
+            "example": "Easy DIY Floating Shelves"
+          },
+          "description": {
+            "type": "string"
+          },
+          "link": {
+            "type": "string"
+          },
+          "images": {
+            "type": "object",
+            "properties": {
+              "orig": {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string"
+                  }
+                }
+              },
+              "236x": {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "pinner": {
+            "type": "object",
+            "properties": {
+              "username": {
+                "type": "string"
+              },
+              "full_name": {
+                "type": "string"
+              }
+            }
+          },
+          "repin_count": {
+            "type": "integer",
+            "example": 1420
+          },
+          "comment_count": {
+            "type": "integer",
+            "example": 35
+          },
+          "isAiModified": {
+            "type": "boolean",
+            "description": "Whether the pin is AI-modified or AI-generated",
+            "example": true
+          },
+          "aiType": {
+            "type": "string",
+            "enum": [
+              "AI Generated",
+              "AI Modified",
+              "AI Disclosed",
+              "AI Annotated",
+              "NO"
+            ],
+            "description": "Specific AI classification",
+            "example": "AI Generated"
+          },
+          "Is AI Modified": {
+            "type": "string",
+            "enum": [
+              "YES",
+              "NO"
+            ],
+            "description": "Parity column #30 status (YES / NO)",
+            "example": "YES"
+          },
+          "aiConfidence": {
+            "type": "string",
+            "example": "High"
+          },
+          "aiSource": {
+            "type": "string",
+            "example": "IPTC trainedAlgorithmicMedia (Platform Verified)"
+          }
+        }
+      },
+      "PinDetail": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "saves": {
+            "type": "integer"
+          },
+          "comments": {
+            "type": "integer"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "creator": {
+            "type": "object",
+            "properties": {
+              "username": {
+                "type": "string"
+              },
+              "followers": {
+                "type": "integer"
+              }
+            }
+          },
+          "isAiModified": {
+            "type": "boolean",
+            "description": "Whether the pin is AI-modified or AI-generated",
+            "example": true
+          },
+          "aiType": {
+            "type": "string",
+            "description": "Specific classification: AI Generated, AI Modified, AI Disclosed, AI Annotated, or NO",
+            "example": "AI Generated"
+          },
+          "aiConfidence": {
+            "type": "string",
+            "example": "High"
+          },
+          "aiSource": {
+            "type": "string",
+            "example": "IPTC trainedAlgorithmicMedia (Platform Verified)"
+          }
+        }
+      },
+      "BoardItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "123456789"
+          },
+          "name": {
+            "type": "string",
+            "example": "Living Room Inspo"
+          },
+          "url": {
+            "type": "string"
+          },
+          "pin_count": {
+            "type": "integer",
+            "example": 420
+          },
+          "follower_count": {
+            "type": "integer",
+            "example": 15800
+          },
+          "owner": {
+            "type": "object",
+            "properties": {
+              "username": {
+                "type": "string"
+              },
+              "full_name": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "UserItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string",
+            "example": "decorlover"
+          },
+          "full_name": {
+            "type": "string"
+          },
+          "follower_count": {
+            "type": "integer",
+            "example": 45000
+          },
+          "pin_count": {
+            "type": "integer"
+          },
+          "image_large_url": {
+            "type": "string"
+          },
+          "is_verified_merchant": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AnnotationItem": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "example": "aesthetic"
+          },
+          "term": {
+            "type": "string"
+          },
+          "frequency": {
+            "type": "integer"
+          }
+        }
+      },
+      "TrendItem": {
+        "type": "object",
+        "properties": {
+          "term": {
+            "type": "string",
+            "example": "cozy aesthetic"
+          },
+          "growth": {
+            "type": "number",
+            "example": 150
+          },
+          "seasonality": {
+            "type": "string"
+          },
+          "weeklyTrend": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      "InterestKeywordItem": {
+        "type": "object",
+        "properties": {
+          "annotation": {
+            "type": "string",
+            "example": "home decor"
+          },
+          "wordCount": {
+            "type": "integer",
+            "example": 2
+          },
+          "charCount": {
+            "type": "integer",
+            "example": 10
+          },
+          "searchVolume": {
+            "type": "string",
+            "example": "150,000"
+          },
+          "followerCount": {
+            "type": "string",
+            "example": "23,000"
+          },
+          "lastUpdated": {
+            "type": "string",
+            "example": "2026-03-15"
+          },
+          "annotationId": {
+            "type": "string",
+            "example": "9128310923"
+          },
+          "categoryTree": {
+            "type": "string",
+            "example": "Home Decor > Living Room"
+          },
+          "categoryTreeLinks": {
+            "type": "string",
+            "example": "https://www.pinterest.com/ideas/home-decor/"
+          },
+          "annotationLink": {
+            "type": "string",
+            "example": "https://www.pinterest.com/ideas/home-decor/"
+          },
+          "seo_related_interests": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Raw Pinterest SEO interest objects associated with this term"
+          },
+          "ideas_klp_pivots": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Raw Pinterest KLP idea pivot objects associated with this term"
+          }
+        }
+      }
+    }
+  }
+}
