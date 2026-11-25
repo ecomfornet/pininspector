@@ -51,7 +51,6 @@ const state = {
 
   // Pins Subtabs & Unified PinGrid State (Images 2, 3, 4)
   currentPinsSubTab: 'search',
-  pins: [],
   pinsRunning: false,
   pinsCancelled: false,
   pinsImgSize: 25,
@@ -152,13 +151,29 @@ document.getElementById('keywordForm')?.addEventListener('submit', async (e) => 
   }
 });
 
+function getPinImageUrl(p, preferThumb = false) {
+  if (!p) return '';
+  const candidates = preferThumb
+    ? [p.thumbnail, p.image, p.Image, p.images?.['236x']?.url, p.images?.orig?.url]
+    : [p.Image, p.image, p.thumbnail, p.images?.orig?.url, p.images?.['736x']?.url, p.images?.['236x']?.url];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.startsWith('http')) return c;
+  }
+  return '';
+}
+
 function getPinValue(p, colName) {
   if (!p) return '';
+  if (colName === 'Image') {
+    const imgUrl = getPinImageUrl(p, false);
+    if (imgUrl) return imgUrl;
+    return p.Image || '';
+  }
   if (p[colName] !== undefined && p[colName] !== null) return p[colName];
 
   const colMap = {
     '#': p.rank || '',
-    'Image': p.Image || p.image || p.thumbnail || '',
+    'Image': getPinImageUrl(p, false) || p.Image || '',
     'Pin ID': p['Pin ID'] || p.id || '',
     'Title': p.Title || p.title || '',
     'Saves': p.Saves !== undefined ? p.Saves : (p.saves !== undefined ? p.saves : 0),
@@ -525,7 +540,7 @@ function kwUncheckAll() {
 function kwFilterSelected() {
   closeKeywordContextMenu();
   if (!contextKeywordTerm) return;
-  const input = document.getElementById('kwFilterInput');
+  const input = document.getElementById('keywordsFilterInput');
   if (input) {
     input.value = contextKeywordTerm;
     renderKeywords();
@@ -534,7 +549,7 @@ function kwFilterSelected() {
 
 function kwClearFilter() {
   closeKeywordContextMenu();
-  const input = document.getElementById('kwFilterInput');
+  const input = document.getElementById('keywordsFilterInput');
   if (input) input.value = '';
   state.filters.keywords = [];
   renderKeywords();
@@ -620,6 +635,11 @@ function kwDeleteUnselected() {
   state.keywords = state.keywords.filter(k => sel.has(k.keyword));
   renderKeywords();
   updateSelectionBar();
+}
+
+function kwDeleteAll() {
+  closeKeywordContextMenu();
+  clearKeywordsGrid();
 }
 
 function toggleKwFileMenu() {
@@ -1901,18 +1921,14 @@ function annContextSendSelectedToTrends() {
   }
   if (selected.length === 0) return alert('No rows selected.');
   const terms = selected.map((a) => a.annotation);
-  switchTab('trends');
-  const input = document.getElementById('trendSearchTerm');
-  if (input) input.value = terms.join('\n');
+  sendToTrends(terms);
 }
 
 function annContextSendAllToTrends() {
   closeAnnotationContextMenu();
   if (state.annotations.length === 0) return alert('No rows to send.');
   const terms = state.annotations.map((a) => a.annotation);
-  switchTab('trends');
-  const input = document.getElementById('trendSearchTerm');
-  if (input) input.value = terms.join('\n');
+  sendToTrends(terms);
 }
 
 function annContextSendSelectedToKeywords() {
@@ -1925,8 +1941,8 @@ function annContextSendSelectedToKeywords() {
   if (selected.length === 0) return alert('No rows selected.');
   const terms = selected.map((a) => a.annotation);
   switchTab('keywords');
-  const input = document.getElementById('kwSearchPhrases');
-  if (input) input.value = terms.join('\n');
+  const input = document.getElementById('kwInput');
+  if (input) input.value = terms.join(', ');
 }
 
 function annSelectAll() {
@@ -2454,6 +2470,7 @@ function toggleTrendRowSelect(term, event) {
   }
   const sel = document.getElementById('trendSelectedCount');
   if (sel) sel.textContent = state.selected.trends.size;
+  updateSelectionBar();
   renderTrends();
 }
 
@@ -2888,8 +2905,10 @@ function trendSendSelectedToKE() {
 
 function trendSendAllToKE() {
   closeTrendContextMenu();
-  const terms = state.trends.map((t) => t.term);
-  alert(`Sending ${terms.length} keywords to Keywords Everywhere...`);
+  if (!state.trends || state.trends.length === 0) {
+    return alert('No keywords available to send.');
+  }
+  fetchKeywordsEverywhere('trends', state.trends.map((t) => t.term));
 }
 
 function trendSendSelectedToAnnotations() {
@@ -3128,7 +3147,7 @@ function copySelectedTrendKeywords() {
 }
 
 function getTrendsSearchVolume() {
-  alert('Search Volume: Keywords Everywhere API key can be set in Settings.');
+  sendTrendsToKeywordsEverywhere();
 }
 
 function sendTrendsToKeywordsEverywhere() {
@@ -3138,7 +3157,7 @@ function sendTrendsToKeywordsEverywhere() {
     alert('No keywords available to send.');
     return;
   }
-  alert(`Sending ${terms.length} keywords to Keywords Everywhere...`);
+  fetchKeywordsEverywhere('trends', terms);
 }
 
 // ----------------------------------------------------------------------
@@ -3149,7 +3168,7 @@ async function openTrendChartModal(term) {
   document.getElementById('chartTermTitle').textContent = `Searches Over Time: "${term}"`;
   document.getElementById('trendChartModal').classList.remove('hidden');
 
-  const country = document.getElementById('trendsCountry')?.value || 'US';
+  const country = document.getElementById('trendCountrySelect')?.value || 'US';
   try {
     const res = await fetch(`/api/trend-history?term=${encodeURIComponent(term)}&country=${country}`);
     const data = await res.json();
@@ -3659,9 +3678,10 @@ async function executeMediaDownload() {
     if (naming === 'id') filenameBase = `${pin.id}`;
 
     // Download Image
-    if ((mediaType === 'both' || mediaType === 'images') && pin.image) {
+    const pinImgUrl = getPinImageUrl(pin, false);
+    if ((mediaType === 'both' || mediaType === 'images') && pinImgUrl) {
       try {
-        const resp = await fetch(`/api/proxy-image?url=${encodeURIComponent(pin.image)}`);
+        const resp = await fetch(`/api/proxy-image?url=${encodeURIComponent(pinImgUrl)}`);
         if (resp.ok) {
           const blob = await resp.blob();
           folder.file(`${filenameBase}.jpg`, blob);
@@ -3671,16 +3691,17 @@ async function executeMediaDownload() {
       }
     }
 
-    // Video media if available
-    if ((mediaType === 'both' || mediaType === 'videos') && pin.videoUrl) {
+    // Video media if available (route via proxy to avoid CDN CORS blocks)
+    const pinVideoUrl = pin.videoUrl || (pin['Video link'] && pin['Video link'] !== 'not-given' ? pin['Video link'] : '');
+    if ((mediaType === 'both' || mediaType === 'videos') && pinVideoUrl) {
       try {
-        const vResp = await fetch(pin.videoUrl);
+        const vResp = await fetch(`/api/proxy-image?url=${encodeURIComponent(pinVideoUrl)}`);
         if (vResp.ok) {
           const vBlob = await vResp.blob();
           folder.file(`${filenameBase}.mp4`, vBlob);
         }
       } catch (err) {
-        console.warn('Failed video download:', pin.id, err);
+        console.warn('Failed video download:', pin.id || pin['Pin ID'], err);
       }
     }
 
@@ -3701,10 +3722,11 @@ async function executeMediaDownload() {
 }
 
 function downloadSinglePinMedia(pinId) {
-  const pin = state.pins.find((p) => p.id === pinId);
-  if (!pin || !pin.image) return;
+  const pin = state.pins.find((p) => (p.id || p['Pin ID']) === pinId);
+  const pinImgUrl = getPinImageUrl(pin, false);
+  if (!pin || !pinImgUrl) return;
   const link = document.createElement('a');
-  link.href = `/api/proxy-image?url=${encodeURIComponent(pin.image)}`;
+  link.href = `/api/proxy-image?url=${encodeURIComponent(pinImgUrl)}`;
   link.download = `pin_${pinId}.jpg`;
   document.body.appendChild(link);
   link.click();
@@ -3726,10 +3748,11 @@ function openFeedPreviewModal() {
         (p) => {
           const pinUrl = p.url || p.pinUrl || (p.id ? `https://www.pinterest.com/pin/${p.id}/` : '#');
           const saves = Number(p.saves) || 0;
+          const imgUrl = getPinImageUrl(p, false);
           return `
       <div class="masonry-item bg-white rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-shadow border border-slate-200">
         <a href="${pinUrl}" target="_blank" class="block relative group">
-          <img src="${p.image || p.thumbnail || ''}" alt="pin" class="w-full object-cover group-hover:opacity-95 transition-opacity" onerror="this.src='https://placehold.co/200x300?text=No+Img'">
+          <img src="${imgUrl}" alt="pin" loading="lazy" referrerpolicy="no-referrer" class="w-full object-cover group-hover:opacity-95 transition-opacity" onerror="this.src='https://placehold.co/200x300?text=No+Img'">
           <div class="absolute top-2 right-2 bg-red-600 text-white text-xs px-2.5 py-0.5 rounded-full font-bold shadow-md">
             ${saves.toLocaleString()} saves
           </div>
@@ -3775,7 +3798,7 @@ function exportFeedHTMLFile() {
   </style>
 </head>
 <body>
-  <h1>Pinterest Pin Inspector Report - ${state.currentPinsQuery}</h1>
+  <h1>Pinterest Pin Inspector Report - ${escapeHtml(state.currentPinsQuery || '')}</h1>
   <div class="grid">
     ${document.getElementById('feedMasonryContainer').innerHTML}
   </div>
@@ -3851,7 +3874,7 @@ function exportTableHTMLFile() {
   </style>
 </head>
 <body>
-  <h1>Pin Inspector Intelligence Table - ${state.currentPinsQuery} (${new Date().toLocaleDateString()})</h1>
+  <h1>Pin Inspector Intelligence Table - ${escapeHtml(state.currentPinsQuery || '')} (${new Date().toLocaleDateString()})</h1>
   ${document.getElementById('tablePreviewContainer').innerHTML}
 </body>
 </html>`;
@@ -3952,16 +3975,28 @@ async function executeBulkImport() {
   closeImportModal();
 
   if (activeImportTool === 'pins') {
-    // Treat as search query or extract first pin
-    const firstPin = cleanPinId(lines[0]);
-    extractPinAnnotations(firstPin);
+    switchTab('pins');
+    switchPinsSubTab('browse-scrape');
+    const textarea = document.getElementById('browseScrapeLinksInput');
+    if (textarea) {
+      textarea.value = lines.join('\n');
+      updateBrowseScrapeLinksCount();
+    }
+    startBrowseScrape();
   } else if (activeImportTool === 'users') {
-    const user = lines[0].replace('https://www.pinterest.com/', '').replace('/', '');
-    analyzeUserPins(user);
+    const usernames = lines
+      .map((l) => l.replace(/^https?:\/\/(?:www\.)?pinterest\.[^/]+\//i, '').split(/[/?#]/)[0].replace(/^@/, '').trim())
+      .filter(Boolean);
+    if (usernames.length === 1) {
+      analyzeUserPins(usernames[0]);
+    } else if (usernames.length > 1) {
+      state.selected.users = new Set(usernames);
+      await analyzeSelectedUsersPins();
+    }
   } else if (activeImportTool === 'boards') {
     document.getElementById('boardsInput').value = lines[0];
     switchTab('boards');
-    document.getElementById('boardsForm').dispatchEvent(new Event('submit'));
+    document.getElementById('boardsForm')?.dispatchEvent(new Event('submit'));
   }
 }
 
@@ -4652,12 +4687,14 @@ async function startBrowseScrape(presetPins = null) {
 
   state.pins = pinItems.map((item, idx) => {
     const preset = (presetPins && Array.isArray(presetPins)) ? presetPins[idx] : null;
+    const presetImg = getPinImageUrl(preset, false);
+    const presetThumb = getPinImageUrl(preset, true);
     const initObj = {};
     for (const col of PIN_56_COLUMNS) {
-      if (col === 'Image') initObj[col] = preset?.image || 'Extracting...';
+      if (col === 'Image') initObj[col] = presetImg || 'Extracting...';
       else if (col === 'Pin ID') initObj[col] = item.id;
       else if (col === 'main link') initObj[col] = item.url;
-      else if (col === 'Title') initObj[col] = preset?.title || 'Extracting...';
+      else if (col === 'Title') initObj[col] = preset?.Title || preset?.title || 'Extracting...';
       else if (col === 'Board') initObj[col] = preset?.board || 'not-extracted';
       else if (col === 'Pinner Name') initObj[col] = preset?.pinner || preset?.author || 'not-extracted';
       else if (col === 'Pinner Username') initObj[col] = preset?.pinnerUsername || 'not-extracted';
@@ -4666,8 +4703,9 @@ async function startBrowseScrape(presetPins = null) {
       else initObj[col] = 'not-extracted';
     }
     initObj.id = item.id;
-    initObj.title = preset?.title || 'Extracting...';
-    initObj.image = preset?.image || '';
+    initObj.title = preset?.Title || preset?.title || 'Extracting...';
+    initObj.image = presetImg || '';
+    initObj.thumbnail = presetThumb || presetImg || '';
     initObj.url = item.url;
     initObj.pinUrl = item.url;
     return initObj;
@@ -4721,7 +4759,14 @@ async function startBrowseScrape(presetPins = null) {
             const item = chunk.items[k];
             const globalIdx = chunk.startIdx + k;
             if (map[item.id]) {
-              state.pins[globalIdx] = map[item.id];
+              const prevImg = getPinImageUrl(state.pins[globalIdx], false);
+              const scrapedPin = map[item.id];
+              if (!getPinImageUrl(scrapedPin, false) && prevImg) {
+                scrapedPin.Image = prevImg;
+                scrapedPin.image = prevImg;
+                scrapedPin.thumbnail = getPinImageUrl(state.pins[globalIdx], true) || prevImg;
+              }
+              state.pins[globalIdx] = scrapedPin;
             }
           }
         } else {
@@ -4739,7 +4784,16 @@ async function startBrowseScrape(presetPins = null) {
               });
               if (res.ok) {
                 const data = await res.json();
-                if (data.pin) state.pins[chunk.startIdx + k] = data.pin;
+                if (data.pin) {
+                  const globalIdx = chunk.startIdx + k;
+                  const prevImg = getPinImageUrl(state.pins[globalIdx], false);
+                  if (!getPinImageUrl(data.pin, false) && prevImg) {
+                    data.pin.Image = prevImg;
+                    data.pin.image = prevImg;
+                    data.pin.thumbnail = getPinImageUrl(state.pins[globalIdx], true) || prevImg;
+                  }
+                  state.pins[globalIdx] = data.pin;
+                }
               }
             } catch (e) {
               // ignore
@@ -4830,16 +4884,19 @@ function renderPins() {
 }
 
 function buildPinRowHtml(index, p) {
-  const thumb = p.Image && p.Image.startsWith('http') ? p.Image : '';
+  const fullImg = getPinImageUrl(p, false);
+  const thumb = getPinImageUrl(p, true) || fullImg;
   const pinId = p['Pin ID'] || p.id || '';
   const mainLink = p['main link'] || (pinId ? `https://www.pinterest.com/pin/${pinId}/` : '#');
   const imgSize = state.pinsImgSize || 25;
   const wrap = state.pinsWrapText ? 'whitespace-normal break-words' : 'whitespace-nowrap';
+  const titleWrap = state.pinsWrapText ? 'whitespace-normal break-words' : 'whitespace-nowrap truncate';
 
   let imageCell = '';
   if (thumb) {
+    const proxyFallback = `/api/proxy-image?inline=1&url=${encodeURIComponent(fullImg || thumb)}`;
     imageCell = `<a href="${mainLink}" target="_blank" class="block rounded overflow-hidden bg-slate-100 shadow-xs border border-slate-200 mx-auto" style="width:${Math.round(imgSize * 0.7)}px; height:${imgSize}px;">
-      <img src="${thumb}" alt="pin" class="w-full h-full object-cover">
+      <img src="${thumb}" alt="pin" loading="lazy" referrerpolicy="no-referrer" class="w-full h-full object-cover" onerror="if(!this.dataset.proxied){this.dataset.proxied='1';this.src='${proxyFallback}';}else{this.outerHTML='<span class=\\'text-slate-400 text-[10px] italic\\'>not-given</span>';}">
     </a>`;
   } else if (p.Image === 'Extracting...') {
     imageCell = `<span class="text-amber-600 font-semibold animate-pulse text-[10px]">Extracting...</span>`;
@@ -4853,14 +4910,14 @@ function buildPinRowHtml(index, p) {
   } else if (p.Title === 'not-extracted') {
     titleCell = `<span class="text-slate-400 italic">not-extracted</span>`;
   } else {
-    titleCell = `<a href="${mainLink}" target="_blank" class="font-medium text-slate-900 hover:text-red-600 ${wrap} max-w-sm block">${escapeHtml(p.Title || p.title || 'Untitled')}</a>`;
+    titleCell = `<a href="${mainLink}" target="_blank" class="font-medium text-slate-900 hover:text-red-600 ${titleWrap} max-w-sm block">${escapeHtml(p.Title || p.title || 'Untitled')}</a>`;
   }
 
   const cells = [
     `<td class="py-2.5 px-2 text-center font-mono text-slate-400 text-[11px] col-pin-0" data-col="#">${index + 1}</td>`,
     `<td class="py-2.5 px-3 text-center col-pin-1" data-col="Image">${imageCell}</td>`,
     `<td class="py-2.5 px-3 font-mono text-xs col-pin-2" data-col="Pin ID"><a href="${mainLink}" target="_blank" class="hover:underline text-blue-600 font-semibold">${escapeHtml(pinId)}</a></td>`,
-    `<td class="py-2.5 px-4 min-w-[200px] col-pin-3" data-col="Title">${titleCell}</td>`,
+    `<td class="py-2.5 px-4 min-w-[200px] max-w-sm col-pin-3" data-col="Title">${titleCell}</td>`,
   ];
 
   for (let c = 3; c < PIN_56_COLUMNS.length; c++) {
@@ -5140,10 +5197,7 @@ function pinContextSendToKeywords() {
     alert('Pin has no title to send to Keywords.');
     return;
   }
-  switchTab('keywords');
-  const input = document.getElementById('kwSearchInput');
-  if (input) input.value = title;
-  searchKeywords();
+  sendToKeywords(title);
 }
 
 function pinContextSendToTrends() {
@@ -5155,10 +5209,7 @@ function pinContextSendToTrends() {
     alert('Pin has no title to send to Trends.');
     return;
   }
-  switchTab('trends');
-  const input = document.getElementById('trendSearchInput');
-  if (input) input.value = title;
-  generateTrends();
+  sendToTrends(title);
 }
 
 function pinContextSendToAnnotations() {
@@ -5167,15 +5218,16 @@ function pinContextSendToAnnotations() {
   if (!p) return;
   const title = (p.Title || p.title || '').trim();
   const annotations = (p.Annotations || p.annotations || '').trim();
-  const query = annotations || title;
+  const query = (annotations && annotations !== 'not-given') ? annotations.split(',')[0].trim() : title;
   if (!query) {
     alert('Pin has no title or annotations to send.');
     return;
   }
   switchTab('annotations');
-  const input = document.getElementById('annotationsQueryInput');
+  switchAnnSubTab('search');
+  const input = document.getElementById('annSearchPhrase');
   if (input) input.value = query;
-  searchAnnotations();
+  startAnnotationsSearch();
 }
 
 function pinContextSendToBoards() {
@@ -5183,15 +5235,12 @@ function pinContextSendToBoards() {
   const p = getContextPin();
   if (!p) return;
   const boardName = (p['Board Name'] || p.boardName || p.board?.name || '').trim();
-  const query = boardName || (p.Title || p.title || '').trim();
+  const query = (boardName && boardName !== 'not-given') ? boardName : (p.Title || p.title || '').trim();
   if (!query) {
     alert('Pin has no board name or title to search boards.');
     return;
   }
-  switchTab('boards');
-  const input = document.getElementById('boardSearchInput');
-  if (input) input.value = query;
-  searchBoards();
+  sendToBoards(query);
 }
 
 function pinContextSendToPeople() {
@@ -5200,15 +5249,12 @@ function pinContextSendToPeople() {
   if (!p) return;
   const username = (p['Pinner Username'] || p.pinnerUsername || p.pinner?.username || '').replace(/^@/, '').trim();
   const name = (p['Pinner Name'] || p.pinnerName || '').trim();
-  const query = username || name || (p.Title || p.title || '').trim();
+  const query = (username && username !== 'not-given') ? username : ((name && name !== 'not-given') ? name : (p.Title || p.title || '').trim());
   if (!query) {
     alert('Pin has no pinner username or name to search people.');
     return;
   }
-  switchTab('users');
-  const input = document.getElementById('userSearchInput');
-  if (input) input.value = query;
-  searchUsers();
+  sendToPeople(query);
 }
 
 function pinCopyLink() {
@@ -5320,19 +5366,20 @@ function exportPinsHTML() {
   <h2>Pinterest Pins Report (${filtered.length} pins)</h2>
   <table><thead><tr><th>#</th>`;
   for (const col of PIN_56_COLUMNS) {
-    html += `<th>${col}</th>`;
+    html += `<th>${escapeHtml(col)}</th>`;
   }
   html += `</tr></thead><tbody>`;
   filtered.forEach((p, idx) => {
     html += `<tr><td>${idx + 1}</td>`;
     for (const col of PIN_56_COLUMNS) {
       const val = getPinValue(p, col) || (p[col] !== undefined ? p[col] : 'not-given');
+      const safeStr = escapeHtml(String(val));
       if (col === 'Image' && String(val).startsWith('http')) {
-        html += `<td><img src="${val}"></td>`;
+        html += `<td><img src="${escapeQuotes(String(val))}"></td>`;
       } else if (String(val).startsWith('http')) {
-        html += `<td><a href="${val}" target="_blank">${val}</a></td>`;
+        html += `<td><a href="${escapeQuotes(String(val))}" target="_blank">${safeStr}</a></td>`;
       } else {
-        html += `<td>${val}</td>`;
+        html += `<td>${safeStr}</td>`;
       }
     }
     html += `</tr>`;
@@ -5471,7 +5518,7 @@ async function analyzeSelectedUsersPins() {
 
   switchTab('pins');
   const tbody = document.getElementById('pinsTableBody');
-  tbody.innerHTML = `<tr><td colspan="14" class="py-12 text-center text-slate-400"><i class="ph ph-spinner animate-spin text-xl inline-block mr-2"></i> Batch extracting pins for ${targetUsers.length} accounts (${targetUsers.map(u => '@' + u).join(', ')})...</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="57" class="py-12 text-center text-slate-400"><i class="ph ph-spinner animate-spin text-xl inline-block mr-2"></i> Batch extracting pins for ${targetUsers.length} accounts (${escapeHtml(targetUsers.map(u => '@' + u).join(', '))})...</td></tr>`;
 
   try {
     const res = await fetch('/api/batch-user-pins', {
@@ -5488,12 +5535,13 @@ async function analyzeSelectedUsersPins() {
 
     const incomingPins = data.pins || [];
     // Append to existing pins
-    const existingIds = new Set(state.pins.map((p) => p.id));
+    const existingIds = new Set(state.pins.map((p) => p['Pin ID'] || p.id));
     let added = 0;
     for (const p of incomingPins) {
-      if (!existingIds.has(p.id)) {
+      const pid = p['Pin ID'] || p.id;
+      if (pid && !existingIds.has(pid)) {
         state.pins.push(p);
-        existingIds.add(p.id);
+        existingIds.add(pid);
         added++;
       }
     }
@@ -5544,7 +5592,7 @@ async function executeAnalyzeUserBoards() {
 async function analyzeUserBoards(username, count = '50') {
   switchTab('boards');
   const tbody = document.getElementById('boardsTableBody');
-  tbody.innerHTML = `<tr><td colspan="14" class="py-12 text-center text-slate-500 font-medium"><i class="ph ph-spinner animate-spin text-xl inline-block mr-2 text-red-600"></i> Fetching boards for @${username}...</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="19" class="py-12 text-center text-slate-500 font-medium"><i class="ph ph-spinner animate-spin text-xl inline-block mr-2 text-red-600"></i> Fetching boards for @${escapeHtml(username)}...</td></tr>`;
 
   try {
     const res = await fetch(`/api/user-boards?username=${encodeURIComponent(username)}&count=${encodeURIComponent(count)}`);
@@ -5572,7 +5620,7 @@ async function analyzeSelectedUsersBoards() {
 
   switchTab('boards');
   const tbody = document.getElementById('boardsTableBody');
-  tbody.innerHTML = `<tr><td colspan="14" class="py-12 text-center text-slate-500 font-medium"><i class="ph ph-spinner animate-spin text-xl inline-block mr-2 text-red-600"></i> Fetching boards for ${selUsers.length} accounts...</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="19" class="py-12 text-center text-slate-500 font-medium"><i class="ph ph-spinner animate-spin text-xl inline-block mr-2 text-red-600"></i> Fetching boards for ${selUsers.length} accounts...</td></tr>`;
 
   let aggregatedBoards = [];
   const seenBoardIds = new Set();
@@ -5775,12 +5823,14 @@ async function analyzeBoardPins(boardId, boardName) {
 }
 
 function extractPinAnnotations(pinId) {
-  document.getElementById('annInput').value = pinId;
   switchTab('annotations');
-  document.getElementById('annForm').dispatchEvent(new Event('submit'));
+  switchAnnSubTab('pins');
+  const input = document.getElementById('annPinsLinksInput');
+  if (input) input.value = pinId;
+  extractAnnotationsFromPinsLinks();
 }
 
-async function fetchKeywordsEverywhere(targetTable) {
+async function fetchKeywordsEverywhere(targetTable, overrideTerms = null) {
   if (!state.keApiKey) {
     alert('Please enter your Keywords Everywhere API key in Settings first.');
     openSettingsModal();
@@ -5788,8 +5838,10 @@ async function fetchKeywordsEverywhere(targetTable) {
   }
 
   let list = [];
-  if (targetTable === 'keywords') list = state.keywords.map((k) => k.keyword);
+  if (Array.isArray(overrideTerms) && overrideTerms.length > 0) list = overrideTerms;
+  else if (targetTable === 'keywords') list = state.keywords.map((k) => k.keyword);
   else if (targetTable === 'annotations') list = state.annotations.map((a) => a.annotation);
+  else if (targetTable === 'trends') list = state.trends.map((t) => t.term);
 
   if (list.length === 0) {
     alert('No keywords available to enrich.');
@@ -5829,9 +5881,20 @@ async function fetchKeywordsEverywhere(targetTable) {
           a.vol = m.vol;
           a.cpc = m.cpc;
           a.competition = m.competition;
+          a.searchVolume = m.vol || a.searchVolume;
         }
       });
       renderAnnotations();
+    } else if (targetTable === 'trends') {
+      state.trends.forEach((t) => {
+        const m = metrics[t.term.toLowerCase()];
+        if (m) {
+          t.vol = m.vol;
+          t.cpc = m.cpc;
+          t.competition = m.competition;
+        }
+      });
+      renderTrends();
     }
     alert('Volume and CPC metrics enriched successfully!');
   } catch (err) {
@@ -5860,10 +5923,7 @@ function exportKeywordsCSV() {
   downloadFile(`keywords_${Date.now()}.csv`, csvContent, 'text/csv;charset=utf-8;');
 }
 
-function exportPinsCSV() {
-  const data = state.browseScrapePins.length > 0 ? state.browseScrapePins : state.pins;
-  exportPins56ToCSV(`pins_${Date.now()}.csv`, data);
-}
+// Duplicate exportPinsCSV removed; canonical exportPinsCSV is defined above using filtered state.pins.
 
 function formatPinCsvValue(col, val, pin) {
   if (val === undefined || val === null) {
@@ -5939,9 +5999,7 @@ function exportPins56ToCSV(filename, data) {
   downloadFile(filename, csvContent, 'text/csv;charset=utf-8;');
 }
 
-function exportBoardsCSV() {
-  exportDataToCSV(`boards_${Date.now()}.csv`, state.boards);
-}
+// Duplicate exportBoardsCSV removed; canonical 17-column exportBoardsCSV is defined above.
 
 function exportUsersCSV() {
   exportDataToCSV(`users_${Date.now()}.csv`, state.users);

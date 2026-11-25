@@ -192,10 +192,11 @@
         ],
         "responses": {
           "200": {
-            "description": "Binary image stream (JPEG/PNG)",
+            "description": "Binary media stream (JPEG/PNG/MP4)",
             "content": {
               "image/jpeg": {},
-              "image/png": {}
+              "image/png": {},
+              "video/mp4": {}
             }
           },
           "400": {
@@ -225,14 +226,15 @@
           {
             "name": "mode",
             "in": "query",
-            "description": "Keyword generation mode: after (seed + a-z), before (a-z + seed), both (combinations), or exact (seed alone)",
+            "description": "Keyword generation mode: after (seed + a-z0-9), before (a-z0-9 + seed), both (combinations), single (seed alone), or aa_zz (two-letter combos)",
             "schema": {
               "type": "string",
               "enum": [
                 "after",
                 "before",
                 "both",
-                "exact"
+                "single",
+                "aa_zz"
               ],
               "default": "after"
             }
@@ -307,6 +309,10 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "apiKey": {
+                    "type": "string",
+                    "description": "Keywords Everywhere API key"
+                  },
                   "keywords": {
                     "type": "array",
                     "items": {
@@ -323,14 +329,11 @@
                   },
                   "currency": {
                     "type": "string",
-                    "default": "usd"
-                  },
-                  "dataSource": {
-                    "type": "string",
-                    "default": "gkp"
+                    "default": "USD"
                   }
                 },
                 "required": [
+                  "apiKey",
                   "keywords"
                 ]
               }
@@ -339,32 +342,24 @@
         },
         "responses": {
           "200": {
-            "description": "Keyword metrics enrichment data",
+            "description": "Keyword metrics enrichment data keyed by lowercase keyword",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "data": {
-                      "type": "array",
-                      "items": {
+                    "metrics": {
+                      "type": "object",
+                      "additionalProperties": {
                         "type": "object",
                         "properties": {
-                          "keyword": {
-                            "type": "string"
-                          },
                           "vol": {
                             "type": "integer",
                             "example": 22200
                           },
                           "cpc": {
-                            "type": "object",
-                            "properties": {
-                              "value": {
-                                "type": "string",
-                                "example": "0.85"
-                              }
-                            }
+                            "type": "string",
+                            "example": "0.85"
                           },
                           "competition": {
                             "type": "number",
@@ -550,7 +545,16 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PinDetail"
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "pin": {
+                      "$ref": "#/components/schemas/PinDetail"
+                    }
+                  }
                 }
               }
             }
@@ -564,7 +568,7 @@
           "Pins Analyzer"
         ],
         "summary": "Batch Scrape Multiple Pins",
-        "description": "Concurrently scrapes detailed metadata for an array of pin IDs with controlled parallelism.",
+        "description": "Concurrently scrapes detailed metadata for an array of pin IDs or URLs with controlled parallelism.",
         "requestBody": {
           "required": true,
           "content": {
@@ -572,6 +576,12 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "pins": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
                   "pinIds": {
                     "type": "array",
                     "items": {
@@ -580,27 +590,37 @@
                   },
                   "concurrency": {
                     "type": "integer",
-                    "default": 5
+                    "default": 15
                   }
-                },
-                "required": [
-                  "pinIds"
-                ]
+                }
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Map of pin ID to scraped detail",
+            "description": "Batch scraped pin details and lookup map",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "results": {
+                    "success": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "pins": {
                       "type": "array",
                       "items": {
+                        "$ref": "#/components/schemas/PinDetail"
+                      }
+                    },
+                    "resultsMap": {
+                      "type": "object",
+                      "additionalProperties": {
                         "$ref": "#/components/schemas/PinDetail"
                       }
                     }
@@ -696,8 +716,9 @@
             }
           },
           {
-            "name": "stream",
+            "name": "deep",
             "in": "query",
+            "description": "Set to true to enrich each pin with 56-column metadata",
             "schema": {
               "type": "boolean",
               "default": false
@@ -712,6 +733,24 @@
                 "schema": {
                   "type": "object",
                   "properties": {
+                    "boardId": {
+                      "type": "string"
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "pinIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "links": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
                     "pins": {
                       "type": "array",
                       "items": {
@@ -948,12 +987,46 @@
         "description": "Fetches Pinterest official guided search annotation tags for a query.",
         "parameters": [
           {
-            "name": "query",
+            "name": "phrase",
             "in": "query",
-            "required": true,
+            "required": false,
+            "description": "Search phrase (alias: query)",
             "schema": {
               "type": "string",
               "example": "halloween costumes"
+            }
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "description": "Alias for phrase",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          },
+          {
+            "name": "searchIn",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "all_pins"
+            }
+          },
+          {
+            "name": "stream",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
             }
           }
         ],
@@ -965,10 +1038,13 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "annotations": {
+                    "total": {
+                      "type": "integer"
+                    },
+                    "results": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/AnnotationItem"
+                        "$ref": "#/components/schemas/InterestKeywordItem"
                       }
                     }
                   }
@@ -985,7 +1061,7 @@
           "Pin Annotations"
         ],
         "summary": "Extract Annotations from Pins Array",
-        "description": "Reverse-engineers annotation tags and dominant themes from a set of pins.",
+        "description": "Reverse-engineers annotation tags and dominant themes from a list of pin links/IDs or pin objects.",
         "requestBody": {
           "required": true,
           "content": {
@@ -993,16 +1069,19 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "links": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
                   "pins": {
                     "type": "array",
                     "items": {
                       "$ref": "#/components/schemas/PinItem"
                     }
                   }
-                },
-                "required": [
-                  "pins"
-                ]
+                }
               }
             }
           }
@@ -1015,10 +1094,13 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "annotations": {
+                    "total": {
+                      "type": "integer"
+                    },
+                    "results": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/AnnotationItem"
+                        "$ref": "#/components/schemas/InterestKeywordItem"
                       }
                     }
                   }
@@ -1065,10 +1147,13 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "annotations": {
+                    "total": {
+                      "type": "integer"
+                    },
+                    "results": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/AnnotationItem"
+                        "$ref": "#/components/schemas/InterestKeywordItem"
                       }
                     }
                   }
@@ -1310,26 +1395,47 @@
         "tags": [
           "Pin Annotations"
         ],
-        "summary": "Get Stored Annotations",
-        "description": "Retrieves the saved collection of annotations.",
+        "summary": "Get Pin Annotations (Single Pin ID)",
+        "description": "Retrieves extracted guided search annotations for a specific Pinterest Pin ID.",
+        "parameters": [
+          {
+            "name": "pinId",
+            "in": "query",
+            "required": true,
+            "description": "Pinterest numeric pin ID",
+            "schema": {
+              "type": "string",
+              "example": "771804454924719041"
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "All stored annotations",
+            "description": "Annotations extracted for the pin",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
+                    "pinId": {
+                      "type": "string"
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
                     "annotations": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/AnnotationItem"
+                        "$ref": "#/components/schemas/InterestKeywordItem"
                       }
                     }
                   }
                 }
               }
             }
+          },
+          "400": {
+            "description": "pinId is required"
           }
         }
       }
@@ -1340,8 +1446,22 @@
           "Pinterest Trends"
         ],
         "summary": "Pinterest Trends Redirector",
-        "description": "Redirects to /api/trends/generate if query is provided, or /api/trends/latest otherwise.",
+        "description": "Redirects to /api/trends/generate if phrase, seed, or query is provided, or /api/trends/latest otherwise.",
         "parameters": [
+          {
+            "name": "phrase",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "seed",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "query",
             "in": "query",
@@ -1408,7 +1528,10 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "trends": {
+                    "total": {
+                      "type": "integer"
+                    },
+                    "items": {
                       "type": "array",
                       "items": {
                         "$ref": "#/components/schemas/TrendItem"
@@ -1455,11 +1578,10 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "date": {
-                      "type": "string",
-                      "example": "2026-10-06"
+                    "total": {
+                      "type": "integer"
                     },
-                    "trends": {
+                    "items": {
                       "type": "array",
                       "items": {
                         "$ref": "#/components/schemas/TrendItem"
@@ -1513,7 +1635,10 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "trends": {
+                    "total": {
+                      "type": "integer"
+                    },
+                    "items": {
                       "type": "array",
                       "items": {
                         "$ref": "#/components/schemas/TrendItem"
@@ -1665,7 +1790,7 @@
         ],
         "responses": {
           "200": {
-            "description": "52-week historical trend curve data",
+            "description": "52-week historical trend curve data and 12-month timeline",
             "content": {
               "application/json": {
                 "schema": {
@@ -1674,15 +1799,45 @@
                     "term": {
                       "type": "string"
                     },
+                    "country": {
+                      "type": "string"
+                    },
+                    "endDate": {
+                      "type": "string"
+                    },
+                    "currentScore": {
+                      "type": "number"
+                    },
+                    "weeklyGrowth": {
+                      "type": "number"
+                    },
+                    "yoyGrowth": {
+                      "type": "number"
+                    },
+                    "seasonalityScore": {
+                      "type": "number"
+                    },
                     "points": {
+                      "type": "array",
+                      "items": {
+                        "type": "number"
+                      }
+                    },
+                    "timeline": {
                       "type": "array",
                       "items": {
                         "type": "object",
                         "properties": {
-                          "date": {
+                          "month": {
                             "type": "string"
                           },
-                          "value": {
+                          "year": {
+                            "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "index": {
                             "type": "number"
                           }
                         }

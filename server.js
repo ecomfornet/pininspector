@@ -309,7 +309,10 @@ app.get('/api/keywords', async (req, res) => {
       try {
         const response = await fetch(
           `https://www.pinterest.com/resource/AdvancedTypeaheadResource/get/?${params.toString()}`,
-          { headers: getRequestHeaders(session, `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(term)}`) }
+          {
+            headers: getRequestHeaders(session, `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(term)}`),
+            signal: AbortSignal.timeout(8000),
+          }
         );
 
         if (!response.ok) return [];
@@ -363,10 +366,10 @@ app.get('/api/keywords', async (req, res) => {
       return { seed, suggestions };
     });
 
+    let rank = 1;
     for (const entry of seedResults) {
       if (!entry) continue;
       const { seed, suggestions } = entry;
-      let rank = 1;
       for (const item of suggestions) {
         const lower = item.toLowerCase();
         if (!seen.has(lower)) {
@@ -383,7 +386,7 @@ app.get('/api/keywords', async (req, res) => {
       }
     }
 
-    res.json({ total: results.length, keywords: results });
+    res.json({ seed: rawQuery, total: results.length, keywords: results });
   } catch (err) {
     console.error('Keywords error:', err);
     res.status(500).json({ error: err.message });
@@ -398,12 +401,142 @@ function safeHostname(link) {
   }
 }
 
+// Helper to reliably extract best original and thumbnail image URLs from any Pinterest pin object
+function extractPinImageUrls(p) {
+  if (!p || typeof p !== 'object') return { origImg: null, thumbImg: null };
+
+  const pickFromImagesObj = (imgs, order) => {
+    if (!imgs || typeof imgs !== 'object') return null;
+    for (const key of order) {
+      const candidate = imgs[key]?.url || (typeof imgs[key] === 'string' ? imgs[key] : null);
+      if (candidate && typeof candidate === 'string' && candidate.startsWith('http')) {
+        return candidate;
+      }
+    }
+    for (const val of Object.values(imgs)) {
+      const candidate = val?.url || (typeof val === 'string' ? val : null);
+      if (candidate && typeof candidate === 'string' && candidate.startsWith('http')) {
+        return candidate;
+      }
+    }
+    return null;
+  };
+
+  const origOrder = ['orig', 'originals', '1200x', '736x', '564x', '474x', '600x315', '236x', '170x', '136x136', '60x60'];
+  const thumbOrder = ['236x', '170x', '474x', '564x', '736x', '136x136', 'orig', 'originals', '1200x', '60x60'];
+
+  const images = p.images || {};
+  let origImg = pickFromImagesObj(images, origOrder);
+  let thumbImg = pickFromImagesObj(images, thumbOrder);
+
+  // Fallback 1: Direct URL properties on pin object
+  if (!origImg) {
+    const directCandidates = [
+      p.image_large_url,
+      p.image_medium_url,
+      p.image_small_url,
+      p.image_url,
+      p.image,
+      p.thumbnail,
+    ];
+    for (const c of directCandidates) {
+      if (typeof c === 'string' && c.startsWith('http')) {
+        origImg = c;
+        break;
+      }
+    }
+  }
+  if (!thumbImg) {
+    const directThumbCandidates = [
+      p.image_medium_url,
+      p.image_small_url,
+      p.image_large_url,
+      p.thumbnail,
+      p.image_url,
+    ];
+    for (const c of directThumbCandidates) {
+      if (typeof c === 'string' && c.startsWith('http')) {
+        thumbImg = c;
+        break;
+      }
+    }
+  }
+
+  // Fallback 2: Story / Idea Pin pages & blocks
+  if (!origImg && p.story_pin_data?.pages?.length) {
+    for (const page of p.story_pin_data.pages) {
+      const pageImg =
+        pickFromImagesObj(page?.image?.images, origOrder) ||
+        pickFromImagesObj(page?.image_adjusted?.images, origOrder);
+      if (pageImg) {
+        origImg = pageImg;
+        if (!thumbImg) {
+          thumbImg =
+            pickFromImagesObj(page?.image?.images, thumbOrder) ||
+            pickFromImagesObj(page?.image_adjusted?.images, thumbOrder) ||
+            pageImg;
+        }
+        break;
+      }
+      if (Array.isArray(page?.blocks)) {
+        for (const blk of page.blocks) {
+          const blkImg =
+            pickFromImagesObj(blk?.image?.images, origOrder) ||
+            pickFromImagesObj(blk?.image_adjusted?.images, origOrder) ||
+            Object.values(blk?.video?.video_list || {}).find((v) => v?.thumbnail?.startsWith('http'))?.thumbnail ||
+            null;
+          if (blkImg) {
+            origImg = blkImg;
+            if (!thumbImg) {
+              thumbImg =
+                pickFromImagesObj(blk?.image?.images, thumbOrder) ||
+                pickFromImagesObj(blk?.image_adjusted?.images, thumbOrder) ||
+                blkImg;
+            }
+            break;
+          }
+        }
+      }
+      if (origImg) break;
+    }
+  }
+
+  // Fallback 3: Carousel pin slots
+  if (!origImg && p.carousel_data?.carousel_slots?.length) {
+    for (const slot of p.carousel_data.carousel_slots) {
+      const slotImg = pickFromImagesObj(slot?.images, origOrder);
+      if (slotImg) {
+        origImg = slotImg;
+        if (!thumbImg) thumbImg = pickFromImagesObj(slot?.images, thumbOrder) || slotImg;
+        break;
+      }
+    }
+  }
+
+  // Fallback 4: Video thumbnail
+  if (!origImg && p.videos?.video_list) {
+    const vThumb = Object.values(p.videos.video_list).find((v) => v?.thumbnail && v.thumbnail.startsWith('http'))?.thumbnail;
+    if (vThumb) origImg = vThumb;
+  }
+
+  // Fallback 5: Deterministic Pinterest CDN URL from 32-char hex image_signature
+  if (!origImg && typeof p.image_signature === 'string' && /^[a-f0-9]{32}$/i.test(p.image_signature.trim())) {
+    const sig = p.image_signature.trim().toLowerCase();
+    const shard = `${sig.slice(0, 2)}/${sig.slice(2, 4)}/${sig.slice(4, 6)}`;
+    origImg = `https://i.pinimg.com/736x/${shard}/${sig}.jpg`;
+    if (!thumbImg) thumbImg = `https://i.pinimg.com/236x/${shard}/${sig}.jpg`;
+  }
+
+  if (!thumbImg) thumbImg = origImg;
+  if (!origImg) origImg = thumbImg;
+
+  return { origImg, thumbImg };
+}
+
 // Helper to format raw pin objects
 function formatPin(p) {
   if (!p) return null;
-  const images = p.images || {};
-  const origImg =
-    images.orig?.url || images['736x']?.url || images['474x']?.url || images['236x']?.url || null;
+  const { origImg, thumbImg } = extractPinImageUrls(p);
   const pinner = p.pinner || p.creator || p.owner || {};
   const board = p.board || {};
   const rxCounts = p.reaction_counts || {};
@@ -438,6 +571,10 @@ function formatPin(p) {
   const boardUrl = board.url ? (board.url.startsWith('http') ? board.url : `https://www.pinterest.com${board.url}`) : '';
   const pinnerUsername = pinner.username || '';
   const pinnerFullName = pinner.full_name || pinner.username || 'Anonymous';
+  const pinTitle =
+    typeof p.title === 'string' && p.title.trim()
+      ? p.title
+      : p.grid_title || p.rich_summary?.display_name || 'Untitled Pin';
 
   const rawAnn = p.pin_join?.visual_annotation || p.visual_annotation || [];
   const hashtags = Array.isArray(p.hashtags) ? p.hashtags.join(',') : (p.hashtags || '');
@@ -446,13 +583,15 @@ function formatPin(p) {
   return {
     id: realId,
     'Pin ID': realId,
+    'Image': origImg || 'not-given',
+    'Title': pinTitle,
     'main link': pinUrl,
-    title: typeof p.title === 'string' && p.title.trim() ? p.title : p.grid_title || p.rich_summary?.display_name || 'Untitled Pin',
+    title: pinTitle,
     description: p.description || p.auto_alt_text || '',
     link: p.link || null,
     domain: p.domain || (p.link ? safeHostname(p.link) : 'Uploaded by user'),
     image: origImg,
-    thumbnail: images['236x']?.url || origImg,
+    thumbnail: thumbImg,
     saves,
     comments,
     totalReactions,
@@ -476,7 +615,7 @@ function formatPin(p) {
     pinner: {
       username: pinnerUsername,
       fullName: pinnerFullName,
-      image: pinner.image_small_url || pinner.image_medium_url || null,
+      image: pinner.image_small_url || pinner.image_medium_url || pinner.image_large_url || null,
       followers: Number(pinner.follower_count) || 0,
     },
     pinnerUsername,
@@ -1110,7 +1249,10 @@ app.post('/api/batch-user-pins', async (req, res) => {
       try {
         const response = await fetch(
           `https://www.pinterest.com/resource/UserPinsResource/get/?${params.toString()}`,
-          { headers: getRequestHeaders(session, `https://www.pinterest.com/${u}/`) }
+          {
+            headers: getRequestHeaders(session, `https://www.pinterest.com/${u}/`),
+            signal: AbortSignal.timeout(10000),
+          }
         );
         if (response.ok) {
           const json = await response.json();
@@ -1128,7 +1270,22 @@ app.post('/api/batch-user-pins', async (req, res) => {
       }
     }
 
-    res.json({ totalUsers: usernames.length, total: aggregatedPins.length, pins: aggregatedPins });
+    // Enrich collected pins with full 56-column metadata when requested (default true)
+    let finalPins = aggregatedPins;
+    if (req.body.deep !== false && aggregatedPins.length > 0) {
+      const toEnrich = aggregatedPins.slice(0, 100);
+      const enriched = await runWorkerPool(toEnrich, Math.min(12, toEnrich.length), async (p) => {
+        try {
+          const deep = await fetchPinDeepDetails(p.id, session);
+          return deep || p;
+        } catch {
+          return p;
+        }
+      });
+      finalPins = enriched.filter(Boolean);
+    }
+
+    res.json({ totalUsers: usernames.length, total: finalPins.length, pins: finalPins });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1524,7 +1681,7 @@ async function fetchPinDeepDetails(pinIdentifier, session) {
   const promoter = d.promoter || null;
   const rx = d.reaction_counts || {};
   const stats = d.aggregated_pin_data?.aggregated_stats || {};
-  const images = d.images || {};
+  const { origImg, thumbImg } = extractPinImageUrls(d);
   const videos = d.videos?.video_list || {};
   const video720 = videos.V_720P || Object.values(videos)[0] || null;
 
@@ -1547,7 +1704,13 @@ async function fetchPinDeepDetails(pinIdentifier, session) {
 
   // Delphi Parity: group board classification matching Pin Inspector 2
   let isGroupBoard = 'NO';
-  if (d.board?.type || d.board?.id || d.board_activity?.type || board.collaborator_count > 0 || board.is_collaborative) {
+  if (
+    board.is_collaborative ||
+    Number(board.collaborator_count) > 0 ||
+    d.board?.is_collaborative ||
+    Number(d.board?.collaborator_count) > 0 ||
+    d.board_activity?.type === 'group_board'
+  ) {
     isGroupBoard = 'YES';
   }
 
@@ -1557,7 +1720,7 @@ async function fetchPinDeepDetails(pinIdentifier, session) {
   const aiInfo = detectPinAiStatus(d, rawAnn, hashtags);
 
   const pinResult = {
-    'Image': images.orig?.url || images['736x']?.url || 'not-given',
+    'Image': origImg || 'not-given',
     'Pin ID': String(d.id || cleanId),
     'Title': d.title || d.grid_title || d.rich_summary?.display_name || 'Untitled Pin',
     'Saves': rawSaves >= 1000 ? fmtNumberCommas(rawSaves) : rawSaves,
@@ -1591,7 +1754,7 @@ async function fetchPinDeepDetails(pinIdentifier, session) {
     'Video link': video720?.url || 'not-given',
     'Video Length': video720?.duration ? Math.round(video720.duration / 1000) : 'not-given',
     'Video Thumbnail': video720?.thumbnail || 'not-given',
-    'Pinner Image': pinner.image_medium_url || pinner.image_large_url || 'not-given',
+    'Pinner Image': pinner.image_medium_url || pinner.image_large_url || pinner.image_small_url || 'not-given',
     'Pinner Username': pinner.username || 'not-given',
     'Pinner Name': pinner.full_name || 'not-given',
     'Pinner Location': pinner.location || 'not-given',
@@ -1599,14 +1762,14 @@ async function fetchPinDeepDetails(pinIdentifier, session) {
     'Board Name': board.name || 'not-given',
     'Board Link': board.url ? (board.url.startsWith('http') ? board.url : `https://www.pinterest.com${board.url}`) : 'not-given',
     'Board Category': board.category || 'not-given',
-    'Board Image': board.image_cover_url || board.image_thumbnail_url || 'not-given',
-    'Creator Image': creator.image_medium_url || 'not-given',
+    'Board Image': board.image_cover_url || board.image_cover_hd_url || board.image_thumbnail_url || (Array.isArray(board.pin_thumbnail_urls) && board.pin_thumbnail_urls[0]) || 'not-given',
+    'Creator Image': creator.image_medium_url || creator.image_large_url || creator.image_small_url || 'not-given',
     'Creator Username': creator.username || 'not-given',
     'Creator Name': creator.full_name || 'not-given',
     'Creator Location': creator.location || 'not-given',
     'Creator Link': creatorLink,
     'Creator Followers': creator.follower_count ? fmtNumberCommas(creator.follower_count) : 'not-given',
-    'Promoter Image': promoter ? (promoter.image_medium_url || 'not-given') : 'not-given',
+    'Promoter Image': promoter ? (promoter.image_medium_url || promoter.image_large_url || promoter.image_small_url || 'not-given') : 'not-given',
     'Promoter Username': promoter ? (promoter.username || 'not-given') : 'not-given',
     'Promoter Name': promoter ? (promoter.full_name || 'not-given') : 'not-given',
     'Promoter Location': promoter ? (promoter.location || 'not-given') : 'not-given',
@@ -1618,8 +1781,8 @@ async function fetchPinDeepDetails(pinIdentifier, session) {
     // Standard properties for UI tables
     id: String(cleanId),
     title: d.title || d.grid_title || d.rich_summary?.display_name || 'Untitled Pin',
-    image: images.orig?.url || images['736x']?.url || images['236x']?.url || null,
-    thumbnail: images['236x']?.url || images.orig?.url || null,
+    image: origImg,
+    thumbnail: thumbImg,
     saves: stats.saves !== undefined ? Number(stats.saves) : (Number(d.repin_count) || 0),
     reactionCount: totalReactions,
     totalReactions,
@@ -1690,17 +1853,19 @@ app.get('/api/scrape-pin', async (req, res) => {
 // Batch scrape pins (Delphi Pin Inspector 2 multithreaded parity)
 app.post('/api/scrape-pins-batch', async (req, res) => {
   try {
-    const { pins = [] } = req.body;
-    if (!Array.isArray(pins) || pins.length === 0) {
+    const rawPins = Array.isArray(req.body.pins) ? req.body.pins : (Array.isArray(req.body.pinIds) ? req.body.pinIds : []);
+    if (rawPins.length === 0) {
       return res.status(400).json({ error: 'Array of pins is required' });
     }
 
     const session = await getPinterestSession();
-    const limit = Math.min(pins.length, 100);
-    const targetPins = pins.slice(0, limit);
+    const limit = Math.min(rawPins.length, 100);
+    const targetPins = rawPins.slice(0, limit);
 
-    // Concurrency matching Pin Inspector 2 multithreaded architecture (15 worker threads)
-    const concurrency = Math.min(15, targetPins.length);
+    // Concurrency matching Pin Inspector 2 multithreaded architecture (up to 15 worker threads)
+    const reqConcurrency = parseInt(req.body.concurrency, 10);
+    const maxWorkers = (!isNaN(reqConcurrency) && reqConcurrency >= 1) ? Math.min(reqConcurrency, 20) : 15;
+    const concurrency = Math.min(maxWorkers, targetPins.length);
     const results = await runWorkerPool(targetPins, concurrency, async (pinId) => {
       try {
         return await fetchPinDeepDetails(pinId, session);
@@ -1771,6 +1936,7 @@ async function fetchInterestDetails(annName, annUrl, session) {
   try {
     const intRes = await fetch(interestUrl, {
       headers: getRequestHeaders(session, `https://www.pinterest.com${cleanUrl}`),
+      signal: AbortSignal.timeout(8000),
     });
 
     if (!intRes.ok) return null;
@@ -1825,7 +1991,7 @@ async function harvestPinIdsForSearch(phrase, count, searchIn, session) {
         data: {
           query: phrase,
           page_size: 25,
-          fields: 'pin.id,pin.type,pin.comments(limit:0,resume:true),pin.pin_join,pin.aggregated_pin_data',
+          fields: 'pin.id,pin.type,pin.images,pin.comments(limit:0,resume:true),pin.canonical_pin,pin.pin_join,pin.aggregated_pin_data',
         },
       },
       context: {},
@@ -1840,6 +2006,7 @@ async function harvestPinIdsForSearch(phrase, count, searchIn, session) {
     try {
       const searchRes = await fetch(searchUrl, {
         headers: getRequestHeaders(session, `https://www.pinterest.com${sourceUrl}`),
+        signal: AbortSignal.timeout(10000),
       });
       if (!searchRes.ok) break;
       const searchJson = await searchRes.json();
@@ -1855,6 +2022,10 @@ async function harvestPinIdsForSearch(phrase, count, searchIn, session) {
         }
         if (!pinId && item.comments?.uri) {
           const m = item.comments.uri.match(/\/pins\/(\d+)/);
+          if (m) pinId = m[1];
+        }
+        if (!pinId && item.canonical_pin?.comments?.uri) {
+          const m = item.canonical_pin.comments.uri.match(/\/pins\/(\d+)/);
           if (m) pinId = m[1];
         }
         if (!pinId && item.pin_join?.native_pin_id && /^\d+$/.test(String(item.pin_join.native_pin_id))) {
@@ -1875,6 +2046,106 @@ async function harvestPinIdsForSearch(phrase, count, searchIn, session) {
   return pinIds;
 }
 
+function collectPinAnnotationCandidates(pinData, seenNames, targetArr) {
+  if (!pinData || typeof pinData !== 'object') return;
+  const annObj = pinData.pin_join?.annotations_with_links || {};
+  for (const [key, val] of Object.entries(annObj)) {
+    const url = val?.url || '';
+    const name = (val?.name || key || '').trim();
+    if (!name) continue;
+    const low = name.toLowerCase();
+    if (seenNames.has(low)) continue;
+    if (url.includes('/ideas/')) {
+      seenNames.add(low);
+      targetArr.push({ name, url });
+    } else {
+      const slug = low.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      if (slug) {
+        seenNames.add(low);
+        targetArr.push({ name, url: `/ideas/${slug}/`, isFallbackSlug: true });
+      }
+    }
+  }
+  const visualObjs = pinData.pin_join?.visual_annotation || pinData.visual_annotation || [];
+  if (Array.isArray(visualObjs)) {
+    for (const v of visualObjs) {
+      const name = (typeof v === 'string' ? v : v?.name || v?.term || '').trim();
+      if (!name) continue;
+      const low = name.toLowerCase();
+      if (seenNames.has(low)) continue;
+      const slug = low.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      seenNames.add(low);
+      targetArr.push({ name, url: slug ? `/ideas/${slug}/` : '', isFallbackSlug: true });
+    }
+  }
+}
+
+async function fetchPinPageAnnotationCandidates(pinId, seenNames, targetArr, session) {
+  try {
+    const htmlRes = await fetch(`https://www.pinterest.com/pin/${encodeURIComponent(pinId)}/`, {
+      headers: {
+        'User-Agent': USER_AGENT,
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        ...(session?.cookieHeader ? { Cookie: session.cookieHeader } : {}),
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!htmlRes.ok) return 0;
+    const html = await htmlRes.text();
+    let added = 0;
+    const matches = html.matchAll(/\/ideas\/([a-z0-9-]+)\/(\d+)\//gi);
+    for (const m of matches) {
+      const slug = m[1].toLowerCase();
+      const id = m[2];
+      const name = slug
+        .split('-')
+        .filter(Boolean)
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ');
+      if (!name) continue;
+      const low = name.toLowerCase();
+      if (seenNames.has(low)) continue;
+      seenNames.add(low);
+      targetArr.push({ name, url: `/ideas/${slug}/${id}/` });
+      added++;
+      if (added >= 12) break;
+    }
+    return added;
+  } catch {
+    return 0;
+  }
+}
+
+async function fetchGuidedSearchAnnotations(phrase, seenNames, targetArr, session) {
+  try {
+    const bsrPayload = { options: { query: phrase, scope: 'pins', auto_correction_disabled: false }, context: {} };
+    const sourceUrl = `/search/pins/?q=${encodeURIComponent(phrase)}`;
+    const url = `https://www.pinterest.com/resource/BaseSearchResource/get/?source_url=${encodeURIComponent(sourceUrl)}&data=${encodeURIComponent(JSON.stringify(bsrPayload))}&_=${Date.now()}`;
+    const res = await fetch(url, {
+      headers: getRequestHeaders(session, `https://www.pinterest.com${sourceUrl}`),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return 0;
+    const json = await res.json();
+    const guides = json.resource_response?.data?.rankedGuides || [];
+    let added = 0;
+    for (const g of guides) {
+      const name = String(g.term || g.display || '').trim();
+      if (!name) continue;
+      const low = name.toLowerCase();
+      if (seenNames.has(low)) continue;
+      seenNames.add(low);
+      const slug = low.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      targetArr.push({ name, url: slug ? `/ideas/${slug}/` : '', isFallbackSlug: true });
+      added++;
+    }
+    return added;
+  } catch {
+    return 0;
+  }
+}
+
 // Helper to batch-extract and enrich annotations from a list of Pin IDs
 async function extractAnnotationsFromPinIds(pinIds, session, maxAnnotations = 60) {
   const seenNames = new Set();
@@ -1886,6 +2157,7 @@ async function extractAnnotationsFromPinIds(pinIds, session, maxAnnotations = 60
     const chunk = pinIds.slice(i, i + concurrency);
     await Promise.all(
       chunk.map(async (pinId) => {
+        const beforeCount = candidateAnnotations.length;
         const pinPayload = {
           options: {
             isPrefetch: false,
@@ -1901,20 +2173,16 @@ async function extractAnnotationsFromPinIds(pinIds, session, maxAnnotations = 60
         try {
           const pinRes = await fetch(pinUrl, {
             headers: getRequestHeaders(session, `https://www.pinterest.com/pin/${pinId}/`),
+            signal: AbortSignal.timeout(10000),
           });
           if (pinRes.ok) {
             const pinJson = await pinRes.json();
-            const annObj = pinJson.resource_response?.data?.pin_join?.annotations_with_links || {};
-            for (const [key, val] of Object.entries(annObj)) {
-              const url = val.url || '';
-              const name = val.name || key;
-              if (url.includes('/ideas/') && !seenNames.has(name.toLowerCase())) {
-                seenNames.add(name.toLowerCase());
-                candidateAnnotations.push({ name, url });
-              }
-            }
+            collectPinAnnotationCandidates(pinJson.resource_response?.data, seenNames, candidateAnnotations);
           }
         } catch (err) {}
+        if (candidateAnnotations.length === beforeCount) {
+          await fetchPinPageAnnotationCandidates(pinId, seenNames, candidateAnnotations, session);
+        }
       })
     );
     if (candidateAnnotations.length >= maxAnnotations) break;
@@ -1940,8 +2208,8 @@ async function extractAnnotationsFromPinIds(pinIds, session, maxAnnotations = 60
           lastUpdated: '',
           annotationId: '',
           categoryTree: c.name,
-          categoryTreeLinks: `https://www.pinterest.com${c.url}`,
-          annotationLink: `https://www.pinterest.com${c.url}`,
+          categoryTreeLinks: c.url && !c.isFallbackSlug ? `https://www.pinterest.com${c.url}` : '',
+          annotationLink: c.url && !c.isFallbackSlug ? `https://www.pinterest.com${c.url}` : '',
           seo_related_interests: [],
           ideas_klp_pivots: [],
         });
@@ -1967,10 +2235,16 @@ app.get('/api/annotations/search', async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    if (res.flushHeaders) res.flushHeaders();
   }
 
+  let clientDisconnected = false;
+  req.on('close', () => {
+    clientDisconnected = true;
+  });
+
   const sendEvent = (type, data) => {
-    if (isStream) {
+    if (isStream && !clientDisconnected) {
       res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
     }
   };
@@ -1984,7 +2258,7 @@ app.get('/api/annotations/search', async (req, res) => {
 
     // 1. Direct Idea check
     const slug = phrase.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    if (slug) {
+    if (slug && !clientDisconnected) {
       const direct = await fetchInterestDetails(phrase, `/ideas/${slug}/`, session);
       if (direct && !seenNames.has(direct.annotation.toLowerCase())) {
         seenNames.add(direct.annotation.toLowerCase());
@@ -1994,7 +2268,7 @@ app.get('/api/annotations/search', async (req, res) => {
     }
 
     // 2. Harvest candidate pins
-    const pinIds = await harvestPinIdsForSearch(phrase, Math.min(60, targetCount * 2), searchIn, session);
+    const pinIds = clientDisconnected ? [] : await harvestPinIdsForSearch(phrase, Math.min(60, targetCount * 2), searchIn, session);
     sendEvent('progress', {
       message: `Found ${pinIds.length} candidate pins. Extracting visual annotations...`,
       current: rows.length,
@@ -2003,12 +2277,14 @@ app.get('/api/annotations/search', async (req, res) => {
 
     // 3. Concurrently inspect pins in chunks of 6
     const concurrency = 6;
-    for (let i = 0; i < pinIds.length && rows.length < targetCount; i += concurrency) {
+    for (let i = 0; i < pinIds.length && rows.length < targetCount && !clientDisconnected; i += concurrency) {
       const chunk = pinIds.slice(i, i + concurrency);
       const candidateBatch = [];
 
       await Promise.all(
         chunk.map(async (pinId) => {
+          if (clientDisconnected) return;
+          const beforeCount = candidateBatch.length;
           const pinPayload = {
             options: {
               isPrefetch: false,
@@ -2024,28 +2300,24 @@ app.get('/api/annotations/search', async (req, res) => {
           try {
             const pinRes = await fetch(pinUrl, {
               headers: getRequestHeaders(session, `https://www.pinterest.com/pin/${pinId}/`),
+              signal: AbortSignal.timeout(10000),
             });
             if (pinRes.ok) {
               const pinJson = await pinRes.json();
-              const annObj = pinJson.resource_response?.data?.pin_join?.annotations_with_links || {};
-              for (const [key, val] of Object.entries(annObj)) {
-                const url = val.url || '';
-                const name = val.name || key;
-                if (url.includes('/ideas/') && !seenNames.has(name.toLowerCase())) {
-                  seenNames.add(name.toLowerCase());
-                  candidateBatch.push({ name, url });
-                }
-              }
+              collectPinAnnotationCandidates(pinJson.resource_response?.data, seenNames, candidateBatch);
             }
           } catch (e) {}
+          if (candidateBatch.length === beforeCount && !clientDisconnected) {
+            await fetchPinPageAnnotationCandidates(pinId, seenNames, candidateBatch, session);
+          }
         })
       );
 
       // Enrich this batch immediately and stream results live!
-      for (let j = 0; j < candidateBatch.length && rows.length < targetCount; j += concurrency) {
+      for (let j = 0; j < candidateBatch.length && rows.length < targetCount && !clientDisconnected; j += concurrency) {
         const annChunk = candidateBatch.slice(j, j + concurrency);
         const enrichedList = await Promise.all(annChunk.map((c) => fetchInterestDetails(c.name, c.url, session)));
-        for (let k = 0; k < annChunk.length && rows.length < targetCount; k++) {
+        for (let k = 0; k < annChunk.length && rows.length < targetCount && !clientDisconnected; k++) {
           const en = enrichedList[k];
           const c = annChunk[k];
           const finalRow = en || {
@@ -2057,8 +2329,8 @@ app.get('/api/annotations/search', async (req, res) => {
             lastUpdated: '',
             annotationId: '',
             categoryTree: c.name,
-            categoryTreeLinks: `https://www.pinterest.com${c.url}`,
-            annotationLink: `https://www.pinterest.com${c.url}`,
+            categoryTreeLinks: c.url && !c.isFallbackSlug ? `https://www.pinterest.com${c.url}` : '',
+            annotationLink: c.url && !c.isFallbackSlug ? `https://www.pinterest.com${c.url}` : '',
             seo_related_interests: [],
             ideas_klp_pivots: [],
           };
@@ -2074,17 +2346,41 @@ app.get('/api/annotations/search', async (req, res) => {
       });
     }
 
+    if (rows.length < targetCount && !clientDisconnected) {
+      const guideCandidates = [];
+      await fetchGuidedSearchAnnotations(phrase, seenNames, guideCandidates, session);
+      for (const c of guideCandidates) {
+        if (rows.length >= targetCount) break;
+        const row = {
+          annotation: c.name,
+          wordCount: c.name.trim().split(/\s+/).length,
+          charCount: c.name.length,
+          searchVolume: 0,
+          followerCount: 0,
+          lastUpdated: '',
+          annotationId: '',
+          categoryTree: c.name,
+          categoryTreeLinks: `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(c.name)}`,
+          annotationLink: `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(c.name)}`,
+          seo_related_interests: [],
+          ideas_klp_pivots: [],
+        };
+        rows.push(row);
+        sendEvent('row', { row, current: rows.length, total: targetCount });
+      }
+    }
+
     sendEvent('done', { total: rows.length, results: rows });
     if (!isStream) {
       res.json({ total: rows.length, results: rows });
-    } else {
+    } else if (!clientDisconnected) {
       res.end();
     }
   } catch (err) {
     console.error('Annotations search error:', err);
     if (isStream) {
       sendEvent('error', { error: err.message });
-      res.end();
+      if (!clientDisconnected) res.end();
     } else {
       res.status(500).json({ error: err.message });
     }
@@ -2093,8 +2389,10 @@ app.get('/api/annotations/search', async (req, res) => {
 
 // 6b. Annotations from Pin Links (Pins Links Subtab)
 app.post('/api/annotations/from-pins', async (req, res) => {
-  const { links } = req.body;
-  if (!links || !Array.isArray(links) || links.length === 0) {
+  const rawLinks = Array.isArray(req.body.links)
+    ? req.body.links
+    : (Array.isArray(req.body.pins) ? req.body.pins.map((p) => (typeof p === 'string' ? p : (p?.id || p?.['Pin ID'] || p?.pinUrl || ''))) : null);
+  if (!rawLinks || rawLinks.length === 0) {
     return res.status(400).json({ error: 'Links array is required' });
   }
 
@@ -2102,7 +2400,7 @@ app.post('/api/annotations/from-pins', async (req, res) => {
     const session = await getPinterestSession();
     const pinIds = [];
 
-    for (const rawLink of links) {
+    for (const rawLink of rawLinks) {
       const trimmed = String(rawLink || '').trim();
       if (!trimmed) continue;
 
@@ -2110,15 +2408,20 @@ app.post('/api/annotations/from-pins', async (req, res) => {
       const pinIdMatch = trimmed.match(/pin\/(\d+)/) || trimmed.match(/^(\d+)$/);
       if (pinIdMatch) {
         pinId = pinIdMatch[1];
-      } else if (trimmed.includes('pin.it/')) {
+      } else {
         try {
-          const redRes = await fetch(trimmed, {
-            method: 'HEAD',
-            redirect: 'follow',
-            headers: { 'User-Agent': USER_AGENT },
-          });
-          const m = redRes.url?.match(/pin\/(\d+)/);
-          if (m) pinId = m[1];
+          const parsedShort = new URL(trimmed);
+          const host = parsedShort.hostname.toLowerCase();
+          if ((parsedShort.protocol === 'https:' || parsedShort.protocol === 'http:') && (host === 'pin.it' || host.endsWith('.pin.it'))) {
+            const redRes = await fetch(parsedShort.toString(), {
+              method: 'HEAD',
+              redirect: 'follow',
+              headers: { 'User-Agent': USER_AGENT },
+              signal: AbortSignal.timeout(8000),
+            });
+            const m = redRes.url?.match(/pin\/(\d+)/);
+            if (m) pinId = m[1];
+          }
         } catch (e) {}
       }
 
@@ -2514,43 +2817,43 @@ app.get('/api/annotations', async (req, res) => {
     const pinUrl = `https://www.pinterest.com/resource/PinResource/get/?source_url=/pin/${pinId}/&data=${encodeURIComponent(JSON.stringify(pinPayload))}&_=${Date.now()}`;
     const response = await fetch(pinUrl, {
       headers: getRequestHeaders(session, `https://www.pinterest.com/pin/${pinId}/`),
+      signal: AbortSignal.timeout(10000),
     });
 
     if (!response.ok) return res.status(response.status).json({ error: `Pinterest returned ${response.status}` });
 
     const json = await response.json();
     const pinData = json?.resource_response?.data || {};
-    const annObj = pinData.pin_join?.annotations_with_links || {};
-    const visualObjs = pinData.pin_join?.visual_annotation || [];
-    const annotations = [];
-
-    for (const [key, val] of Object.entries(annObj)) {
-      const url = val.url || '';
-      const name = val.name || key;
-      if (url.includes('/ideas/')) {
-        const enriched = await fetchInterestDetails(name, url, session);
-        if (enriched) annotations.push(enriched);
-      }
+    const seenNames = new Set();
+    const candidates = [];
+    collectPinAnnotationCandidates(pinData, seenNames, candidates);
+    if (candidates.length === 0) {
+      await fetchPinPageAnnotationCandidates(pinId, seenNames, candidates, session);
     }
 
-    if (annotations.length === 0 && Array.isArray(visualObjs)) {
-      visualObjs.forEach((v) => {
-        const name = typeof v === 'string' ? v : v.name || v.term || '';
-        if (name) {
-          annotations.push({
-            annotation: name,
-            wordCount: name.trim().split(/\s+/).length,
-            charCount: name.length,
-            searchVolume: 0,
-            followerCount: 0,
-            lastUpdated: '',
-            annotationId: '',
-            categoryTree: name,
-            categoryTreeLinks: '',
-            annotationLink: '',
-          });
-        }
-      });
+    const annotations = [];
+    const enrichedList = await Promise.all(candidates.map((c) => fetchInterestDetails(c.name, c.url, session)));
+    for (let i = 0; i < candidates.length; i++) {
+      const en = enrichedList[i];
+      const c = candidates[i];
+      if (en) {
+        annotations.push(en);
+      } else {
+        annotations.push({
+          annotation: c.name,
+          wordCount: c.name.trim().split(/\s+/).length,
+          charCount: c.name.length,
+          searchVolume: 0,
+          followerCount: 0,
+          lastUpdated: '',
+          annotationId: '',
+          categoryTree: c.name,
+          categoryTreeLinks: c.url && !c.isFallbackSlug ? `https://www.pinterest.com${c.url}` : '',
+          annotationLink: c.url && !c.isFallbackSlug ? `https://www.pinterest.com${c.url}` : '',
+          seo_related_interests: [],
+          ideas_klp_pivots: [],
+        });
+      }
     }
 
     res.json({ pinId, total: annotations.length, annotations });
@@ -2675,6 +2978,7 @@ app.get('/api/trends/generate', async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    if (res.flushHeaders) res.flushHeaders();
   }
 
   const sendEvent = (type, data) => {
@@ -2713,7 +3017,10 @@ app.get('/api/trends/generate', async (req, res) => {
 
       const url = `https://trends.pinterest.com/prefix_match/?query=${encodeURIComponent(currentSeed)}&country=${country}`;
       try {
-        const pRes = await fetch(url, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' } });
+        const pRes = await fetch(url, {
+          headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+          signal: AbortSignal.timeout(8000),
+        });
         if (pRes.ok) {
           const items = await pRes.json();
           if (Array.isArray(items)) {
@@ -2867,11 +3174,11 @@ app.post('/api/trends/import', async (req, res) => {
 
 // Legacy / Backward compatibility route
 app.get('/api/trends', async (req, res) => {
-  const phrase = req.query.seed || req.query.query;
+  const phrase = (req.query.phrase || req.query.seed || req.query.query || '').trim();
   if (phrase) {
-    return res.redirect(`/api/trends/generate?phrase=${encodeURIComponent(phrase)}&country=${req.query.country || 'US'}`);
+    return res.redirect(`/api/trends/generate?phrase=${encodeURIComponent(phrase)}&country=${encodeURIComponent(req.query.country || 'US')}`);
   }
-  return res.redirect(`/api/trends/latest?country=${req.query.country || 'US'}`);
+  return res.redirect(`/api/trends/latest?country=${encodeURIComponent(req.query.country || 'US')}`);
 });
 
 // ----------------------------------------------------------------------
@@ -2880,16 +3187,29 @@ app.get('/api/trends', async (req, res) => {
 app.get('/api/proxy-image', async (req, res) => {
   try {
     const imgUrl = req.query.url;
-    if (!imgUrl || !imgUrl.includes('pinimg.com')) {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(String(imgUrl || ''));
+    } catch {
+      return res.status(400).send('Invalid or unauthorized image URL');
+    }
+    const hostname = parsedUrl.hostname.toLowerCase();
+    if (
+      (parsedUrl.protocol !== 'https:' && parsedUrl.protocol !== 'http:') ||
+      (hostname !== 'pinimg.com' && !hostname.endsWith('.pinimg.com'))
+    ) {
       return res.status(400).send('Invalid or unauthorized image URL');
     }
 
-    const response = await fetch(imgUrl);
+    const response = await fetch(parsedUrl.toString(), { signal: AbortSignal.timeout(15000) });
     if (!response.ok) return res.status(response.status).send('Failed to fetch image');
 
     const contentType = response.headers.get('content-type') || 'image/jpeg';
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `attachment; filename="pin_${Date.now()}.jpg"`);
+    if (req.query.inline !== '1') {
+      const ext = contentType.includes('video') || parsedUrl.pathname.endsWith('.mp4') ? 'mp4' : 'jpg';
+      res.setHeader('Content-Disposition', `attachment; filename="pin_${Date.now()}.${ext}"`);
+    }
 
     const arrayBuffer = await response.arrayBuffer();
     res.send(Buffer.from(arrayBuffer));
@@ -2907,10 +3227,11 @@ app.get('/api/trend-history', async (req, res) => {
     const country = req.query.country || 'US';
     if (!term) return res.status(400).json({ error: 'term is required' });
 
-    let endDate = '2026-10-06';
+    let endDate = new Date().toISOString().slice(0, 10);
     try {
       const dateRes = await fetch('https://trends.pinterest.com/latest_available_date/', {
         headers: { 'User-Agent': USER_AGENT, Accept: 'application/json, text/plain, */*' },
+        signal: AbortSignal.timeout(6000),
       });
       if (dateRes.ok) {
         const dateJson = await dateRes.json();
@@ -2918,32 +3239,62 @@ app.get('/api/trend-history', async (req, res) => {
       }
     } catch {}
 
-    const trendsUrl = `https://trends.pinterest.com/top_trends_filtered/?endDate=${endDate}&country=${country}&terms=${encodeURIComponent(term)}`;
-    const trendsRes = await fetch(trendsUrl, {
-      headers: { 'User-Agent': USER_AGENT, Accept: 'application/json, text/plain, */*' },
-    });
+    const [trendsRes, prefixRes] = await Promise.all([
+      fetch(`https://trends.pinterest.com/top_trends_filtered/?endDate=${endDate}&country=${encodeURIComponent(country)}&terms=${encodeURIComponent(term)}`, {
+        headers: { 'User-Agent': USER_AGENT, Accept: 'application/json, text/plain, */*' },
+        signal: AbortSignal.timeout(8000),
+      }).catch(() => null),
+      fetch(`https://trends.pinterest.com/prefix_match/?query=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}`, {
+        headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+        signal: AbortSignal.timeout(8000),
+      }).catch(() => null),
+    ]);
 
     let trendData = null;
-    if (trendsRes.ok) {
+    if (trendsRes && trendsRes.ok) {
       const json = await trendsRes.json();
       if (json.values && json.values.length > 0) {
         trendData = json.values[0];
       }
     }
 
-    // Build 12-month search volume index timeline
-    const months = ['Oct', 'Nov', 'Dec', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep'];
-    const baseCount = trendData?.normalizedCount || Math.floor(Math.random() * 30 + 40);
-    const seasonality = trendData?.seasonality_score || 0.4;
-    const wow = trendData?.wow_change?.value || 0.05;
-    const yoy = trendData?.yoy_change?.value || 0.15;
+    let weeklyCounts = [];
+    if (prefixRes && prefixRes.ok) {
+      const pJson = await prefixRes.json();
+      if (Array.isArray(pJson) && pJson.length > 0) {
+        const exact = pJson.find((it) => (it.term || '').toLowerCase() === term.toLowerCase()) || pJson[0];
+        if (Array.isArray(exact?.counts) && exact.counts.length > 0) {
+          weeklyCounts = exact.counts.map((v) => Number(v) || 0);
+        }
+      }
+    }
 
-    // Generate accurate historical monthly points matching Pinterest Search Volume Index
-    const timeline = months.map((m, i) => {
-      const factor = 1 + Math.sin((i / 11) * Math.PI * 2) * seasonality * 0.4 + (i / 11) * (yoy * 0.2);
-      const val = Math.min(100, Math.max(10, Math.round(baseCount * factor)));
-      return { month: m, year: i < 3 ? '2025' : '2026', label: `${m} ${i < 3 ? '2025' : '2026'}`, index: val };
-    });
+    const baseCount = trendData?.normalizedCount || (weeklyCounts.length > 0 ? weeklyCounts[weeklyCounts.length - 1] : 50);
+    const seasonality = trendData?.seasonality_score || 0.4;
+    const wow = trendData?.wow_change?.value || 0;
+    const yoy = trendData?.yoy_change?.value || 0;
+
+    // Build 12-month timeline anchored to endDate using real 52-week counts when available
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const endDt = new Date(`${endDate}T00:00:00Z`);
+    const endYear = isNaN(endDt.getTime()) ? new Date().getUTCFullYear() : endDt.getUTCFullYear();
+    const endMonthIdx = isNaN(endDt.getTime()) ? new Date().getUTCMonth() : endDt.getUTCMonth();
+
+    const timeline = [];
+    for (let i = 0; i < 12; i++) {
+      const offsetMonths = 11 - i;
+      const d = new Date(Date.UTC(endYear, endMonthIdx - offsetMonths, 1));
+      const m = monthNames[d.getUTCMonth()];
+      const y = String(d.getUTCFullYear());
+      let val = baseCount;
+      if (weeklyCounts.length > 0) {
+        const startIdx = Math.floor((i * weeklyCounts.length) / 12);
+        const endIdx = Math.max(startIdx + 1, Math.floor(((i + 1) * weeklyCounts.length) / 12));
+        const slice = weeklyCounts.slice(startIdx, endIdx);
+        val = Math.round(slice.reduce((a, b) => a + b, 0) / slice.length);
+      }
+      timeline.push({ month: m, year: y, label: `${m} ${y}`, index: val });
+    }
 
     res.json({
       term,
@@ -2953,6 +3304,7 @@ app.get('/api/trend-history', async (req, res) => {
       weeklyGrowth: wow,
       yoyGrowth: yoy,
       seasonalityScore: seasonality,
+      points: weeklyCounts,
       timeline,
     });
   } catch (err) {
