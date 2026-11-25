@@ -7246,6 +7246,14 @@ function renderWinnerPins() {
       showingText.textContent = `Showing ${visible.length} of ${totalScanned} scanned pins`;
     }
   }
+  if (!state.winnerRunning && rawTotalScanned > 0) {
+    const progressText = document.getElementById('winnerProgressText');
+    if (progressText && (progressText.textContent.startsWith('Completed:') || progressText.textContent.startsWith('Stopped'))) {
+      const countryCode = state.winnerCountry || document.getElementById('winnerCountrySelect')?.value || 'US';
+      const statusPrefix = state.winnerCancelled ? 'Stopped' : 'Completed';
+      progressText.textContent = `${statusPrefix}: ${matchedAll.length.toLocaleString()} Winner Pin${matchedAll.length === 1 ? '' : 's'} found out of ${totalScanned.toLocaleString()} scanned for "${state.winnerQuery}" [${countryCode}]`;
+    }
+  }
 
   // Toggle Load More button
   if (loadMoreWrap) {
