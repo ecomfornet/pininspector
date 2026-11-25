@@ -107,6 +107,10 @@
           <i class="ph ph-push-pin text-lg"></i>
           Pins Analyzer
         </button>
+        <button onclick="switchTab('winner')" id="tab-winner" class="tab-btn py-3 px-1 border-b-2 border-transparent text-sm font-medium text-slate-500 hover:text-slate-800 flex items-center gap-2 whitespace-nowrap">
+          <i class="ph ph-trophy text-lg"></i>
+          Winner Pin
+        </button>
         <button onclick="switchTab('boards')" id="tab-boards" class="tab-btn py-3 px-1 border-b-2 border-transparent text-sm font-medium text-slate-500 hover:text-slate-800 flex items-center gap-2 whitespace-nowrap">
           <i class="ph ph-squares-four text-lg"></i>
           Boards Analyzer
@@ -1887,6 +1891,345 @@
               </table>
             </div>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================================== -->
+    <!-- 8. WINNER PIN FINDER (Keyword Search + Live Feed Filter) -->
+    <!-- ===================================================================== -->
+    <section id="panel-winner" class="tab-panel hidden space-y-4">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+
+        <!-- LEFT SIDEBAR: Keyword Search + Feed Filter Card (lg:col-span-3) -->
+        <div class="lg:col-span-3 space-y-4">
+
+          <!-- Keyword Search Form Card -->
+          <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-3.5">
+            <div class="flex items-center justify-between border-b border-slate-100 pb-2.5">
+              <div class="flex items-center gap-2">
+                <span class="w-8 h-8 rounded-xl bg-red-50 text-red-600 flex items-center justify-center">
+                  <i class="ph-bold ph-trophy text-lg"></i>
+                </span>
+                <div>
+                  <h2 class="text-sm font-bold text-slate-900 leading-tight">Winner Pin</h2>
+                  <p class="text-[11px] text-slate-500">Find high-performing pins by keyword</p>
+                </div>
+              </div>
+            </div>
+
+            <form id="winnerSearchForm" onsubmit="event.preventDefault(); startWinnerPinsSearch(false);" class="space-y-3">
+              <div>
+                <label for="winnerKeywordInput" class="block text-xs font-bold text-slate-700 mb-1.5">Keyword to Search:</label>
+                <div class="relative">
+                  <i class="ph ph-magnifying-glass text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 text-sm"></i>
+                  <input type="text" id="winnerKeywordInput" required placeholder="e.g. boho living room, keto dinner" class="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-300 text-xs text-slate-800 font-medium focus:outline-none focus:ring-2 focus:ring-red-500/20 focus:border-red-500">
+                </div>
+              </div>
+
+              <div>
+                <label for="winnerCountrySelect" class="block text-[11px] font-bold text-slate-600 mb-1 flex items-center gap-1">
+                  <i class="ph-bold ph-globe text-red-500 text-xs"></i>
+                  <span>Target Country:</span>
+                </label>
+                <select id="winnerCountrySelect" onchange="onWinnerCountryChange()" class="w-full px-2.5 py-2 rounded-xl border border-slate-300 text-xs bg-white text-slate-800 font-medium focus:outline-none focus:ring-2 focus:ring-red-500/20 focus:border-red-500">
+                  <option value="US" selected>🇺🇸 United States (US - en-US)</option>
+                  <option value="GB">🇬🇧 United Kingdom (GB - en-GB)</option>
+                  <option value="CA">🇨🇦 Canada (CA - en-CA)</option>
+                  <option value="AU">🇦🇺 Australia (AU - en-AU)</option>
+                  <option value="DE">🇩🇪 Germany (DE - de-DE)</option>
+                  <option value="FR">🇫🇷 France (FR - fr-FR)</option>
+                  <option value="ES">🇪🇸 Spain (ES - es-ES)</option>
+                  <option value="IT">🇮🇹 Italy (IT - it-IT)</option>
+                  <option value="MX">🇲🇽 Mexico (MX - es-MX)</option>
+                  <option value="BR">🇧🇷 Brazil (BR - pt-BR)</option>
+                  <option value="AR">🇦🇷 Argentina (AR - es-AR)</option>
+                  <option value="CO">🇨🇴 Colombia (CO - es-CO)</option>
+                  <option value="CL">🇨🇱 Chile (CL - es-CL)</option>
+                  <option value="NL">🇳🇱 Netherlands (NL - nl-NL)</option>
+                  <option value="SE">🇸🇪 Sweden (SE - sv-SE)</option>
+                  <option value="PL">🇵🇱 Poland (PL - pl-PL)</option>
+                  <option value="JP">🇯🇵 Japan (JP - ja-JP)</option>
+                  <option value="IN">🇮🇳 India (IN - en-IN)</option>
+                  <option value="IE">🇮🇪 Ireland (IE - en-IE)</option>
+                  <option value="NZ">🇳🇿 New Zealand (NZ - en-NZ)</option>
+                </select>
+              </div>
+
+              <div class="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label for="winnerScanCountSelect" class="block text-[11px] font-bold text-slate-600 mb-1">Pins to Scan:</label>
+                  <select id="winnerScanCountSelect" class="w-full px-2.5 py-2 rounded-xl border border-slate-300 text-xs bg-white text-slate-800 font-medium focus:outline-none focus:ring-2 focus:ring-red-500/20 focus:border-red-500">
+                    <option value="30">30 pins</option>
+                    <option value="50">50 pins</option>
+                    <option value="100" selected>100 pins</option>
+                    <option value="150">150 pins</option>
+                    <option value="200">200 pins</option>
+                    <option value="300">300 pins</option>
+                    <option value="500">500 pins</option>
+                    <option value="1000">1k pins</option>
+                    <option value="5000">5k pins</option>
+                    <option value="10000">10k pins</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="winnerSearchInSelect" class="block text-[11px] font-bold text-slate-600 mb-1">Pin Type:</label>
+                  <select id="winnerSearchInSelect" onchange="onWinnerPinTypeChange()" class="w-full px-2.5 py-2 rounded-xl border border-slate-300 text-xs bg-white text-slate-800 font-medium focus:outline-none focus:ring-2 focus:ring-red-500/20 focus:border-red-500">
+                    <option value="pins" selected>All Pins</option>
+                    <option value="exclude-videos">Exclude Video</option>
+                    <option value="videos">Videos Only</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="flex items-center gap-2 pt-0.5">
+                <button type="submit" id="winnerSearchBtn" class="flex-1 py-2.5 px-4 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white font-bold text-xs rounded-xl shadow-xs flex items-center justify-center gap-1.5 transition-colors">
+                  <i class="ph-bold ph-magnifying-glass"></i>
+                  <span>Find Winner Pins</span>
+                </button>
+                <button type="button" id="winnerStopBtn" onclick="stopWinnerPinsSearch()" disabled class="hidden py-2.5 px-3.5 bg-slate-800 hover:bg-slate-900 disabled:opacity-40 text-white font-bold text-xs rounded-xl shadow-xs items-center justify-center gap-1 transition-colors">
+                  <i class="ph-fill ph-stop"></i>
+                  <span>Stop</span>
+                </button>
+              </div>
+            </form>
+          </div>
+
+          <!-- FEED FILTER CARD (Exact Match to Reference Design) -->
+          <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-5">
+            <!-- Header -->
+            <div class="flex items-center justify-between border-b border-slate-100 pb-3.5">
+              <div class="flex items-center gap-2">
+                <i class="ph-bold ph-funnel text-pink-600 text-xl"></i>
+                <h3 class="text-base font-bold text-slate-900">Feed Filter</h3>
+              </div>
+              <button type="button" onclick="resetWinnerFilter()" title="Reset filter to default values" class="p-1 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition-colors">
+                <i class="ph-bold ph-x text-base"></i>
+              </button>
+            </div>
+
+            <!-- Enable Filter Toggle -->
+            <div class="bg-slate-50 rounded-xl px-4 py-3 flex items-center justify-between border border-slate-100">
+              <span class="text-sm font-medium text-slate-700">Enable Filter</span>
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" id="winnerEnableFilter" checked onchange="onWinnerFilterChange()" class="sr-only peer">
+                <div class="w-11 h-6 bg-slate-300 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-pink-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:shadow-xs after:transition-all peer-checked:bg-pink-600"></div>
+              </label>
+            </div>
+
+            <!-- Filter Fields Wrapper (dims slightly if filter disabled) -->
+            <div id="winnerFilterFieldsWrap" class="space-y-5 transition-opacity">
+
+              <!-- Minimum Saves -->
+              <div class="space-y-2.5">
+                <div class="flex items-center gap-1 text-sm">
+                  <span class="font-medium text-slate-600">Minimum Saves:</span>
+                  <span id="winnerMinSavesDisplay" class="font-bold text-pink-600">≥ 15</span>
+                </div>
+                <div class="flex items-center gap-2.5">
+                  <input type="number" id="winnerMinSavesInput" min="0" step="1" value="15" oninput="onWinnerFilterChange()" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-pink-500/20 focus:border-pink-500">
+                  <span class="text-sm text-slate-500 shrink-0">saves</span>
+                </div>
+                <div class="flex flex-wrap gap-1.5">
+                  <button type="button" data-winner-saves="0" onclick="setWinnerMinSaves(0)" class="winner-saves-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors">Any</button>
+                  <button type="button" data-winner-saves="10" onclick="setWinnerMinSaves(10)" class="winner-saves-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors">10+</button>
+                  <button type="button" data-winner-saves="50" onclick="setWinnerMinSaves(50)" class="winner-saves-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors">50+</button>
+                  <button type="button" data-winner-saves="100" onclick="setWinnerMinSaves(100)" class="winner-saves-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors">100+</button>
+                  <button type="button" data-winner-saves="500" onclick="setWinnerMinSaves(500)" class="winner-saves-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors">500+</button>
+                  <button type="button" data-winner-saves="1000" onclick="setWinnerMinSaves(1000)" class="winner-saves-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors">1k+</button>
+                </div>
+              </div>
+
+              <!-- Created Within -->
+              <div class="space-y-2.5">
+                <div class="flex items-center gap-1 text-sm">
+                  <span class="font-medium text-slate-600">Created Within:</span>
+                  <span id="winnerMaxDaysDisplay" class="font-bold text-pink-600">&lt; 28 days</span>
+                </div>
+                <div class="flex items-center gap-2.5">
+                  <input type="number" id="winnerMaxDaysInput" min="0" step="1" value="28" oninput="onWinnerFilterChange()" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-pink-500/20 focus:border-pink-500">
+                  <span class="text-sm text-slate-500 shrink-0 whitespace-nowrap">days (0=All)</span>
+                </div>
+                <div class="flex flex-wrap gap-1.5">
+                  <button type="button" data-winner-days="0" onclick="setWinnerMaxDays(0)" class="winner-days-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors">All</button>
+                  <button type="button" data-winner-days="1" onclick="setWinnerMaxDays(1)" class="winner-days-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors">1d</button>
+                  <button type="button" data-winner-days="7" onclick="setWinnerMaxDays(7)" class="winner-days-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors">7d</button>
+                  <button type="button" data-winner-days="14" onclick="setWinnerMaxDays(14)" class="winner-days-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors">14d</button>
+                  <button type="button" data-winner-days="30" onclick="setWinnerMaxDays(30)" class="winner-days-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors">30d</button>
+                  <button type="button" data-winner-days="90" onclick="setWinnerMaxDays(90)" class="winner-days-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors">90d</button>
+                  <button type="button" data-winner-days="365" onclick="setWinnerMaxDays(365)" class="winner-days-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors">1y</button>
+                </div>
+              </div>
+
+              <!-- Pin with Link -->
+              <div class="space-y-2.5">
+                <div class="flex items-center justify-between text-sm">
+                  <span class="font-medium text-slate-600">Pin with Link:</span>
+                  <span id="winnerHasLinkDisplay" class="font-semibold text-pink-600">Yes (Has Link)</span>
+                </div>
+                <div class="flex items-center gap-5 text-sm text-slate-700">
+                  <label class="inline-flex items-center gap-2 cursor-pointer">
+                    <input type="radio" name="winnerHasLink" value="all" onchange="onWinnerFilterChange()" class="w-4 h-4 accent-blue-600 cursor-pointer">
+                    <span>All</span>
+                  </label>
+                  <label class="inline-flex items-center gap-2 cursor-pointer">
+                    <input type="radio" name="winnerHasLink" value="yes" checked onchange="onWinnerFilterChange()" class="w-4 h-4 accent-blue-600 cursor-pointer">
+                    <span>Yes</span>
+                  </label>
+                  <label class="inline-flex items-center gap-2 cursor-pointer">
+                    <input type="radio" name="winnerHasLink" value="no" onchange="onWinnerFilterChange()" class="w-4 h-4 accent-blue-600 cursor-pointer">
+                    <span>No</span>
+                  </label>
+                </div>
+              </div>
+
+              <!-- Filter Action -->
+              <div class="space-y-2.5">
+                <div class="text-sm font-medium text-slate-600">Filter Action:</div>
+                <div class="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-slate-700">
+                  <label class="inline-flex items-center gap-2 cursor-pointer">
+                    <input type="radio" name="winnerFilterAction" value="hide" checked onchange="onWinnerFilterChange()" class="w-4 h-4 accent-blue-600 cursor-pointer">
+                    <span>Hide non-matching</span>
+                  </label>
+                  <label class="inline-flex items-center gap-2 cursor-pointer">
+                    <input type="radio" name="winnerFilterAction" value="dim" onchange="onWinnerFilterChange()" class="w-4 h-4 accent-blue-600 cursor-pointer">
+                    <span>Dim non-matching</span>
+                  </label>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+        </div>
+
+        <!-- RIGHT MAIN AREA: Progress, KPIs, Controls, and Winner Pins Feed (lg:col-span-9) -->
+        <div class="lg:col-span-9 space-y-4">
+
+          <!-- Progress & KPI Summary Header -->
+          <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-3.5">
+            <!-- Progress Bar Row -->
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div class="flex-1 min-w-[220px]">
+                <div class="relative w-full h-6 bg-slate-100 rounded-lg overflow-hidden border border-slate-200">
+                  <div id="winnerProgressBar" class="h-full bg-gradient-to-r from-pink-600 to-red-600 transition-all duration-200" style="width: 0%;"></div>
+                  <span id="winnerProgressText" class="absolute inset-0 flex items-center justify-center text-[11px] font-bold text-slate-700">Enter a keyword and click Find Winner Pins</span>
+                </div>
+              </div>
+              <div class="flex items-center gap-2">
+                <button type="button" onclick="exportWinnerPinsCSV()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors">
+                  <i class="ph ph-file-csv text-sm"></i>
+                  <span>Export CSV</span>
+                </button>
+                <button type="button" onclick="clearWinnerPins()" class="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold border border-slate-200 transition-colors">
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            <!-- KPI Metrics Strip -->
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div class="rounded-xl bg-pink-50/70 border border-pink-100 px-3.5 py-2.5">
+                <div class="text-[11px] font-semibold text-pink-700 flex items-center gap-1">
+                  <i class="ph-fill ph-trophy"></i> Winner Pins
+                </div>
+                <div id="winnerStatMatched" class="text-xl font-extrabold text-pink-700 mt-0.5 font-mono">0</div>
+              </div>
+              <div class="rounded-xl bg-slate-50 border border-slate-200/80 px-3.5 py-2.5">
+                <div class="text-[11px] font-semibold text-slate-500">Total Scanned</div>
+                <div id="winnerStatScanned" class="text-xl font-extrabold text-slate-900 mt-0.5 font-mono">0</div>
+              </div>
+              <div class="rounded-xl bg-emerald-50/70 border border-emerald-100 px-3.5 py-2.5">
+                <div class="text-[11px] font-semibold text-emerald-700">Win Rate</div>
+                <div id="winnerStatRate" class="text-xl font-extrabold text-emerald-700 mt-0.5 font-mono">0%</div>
+              </div>
+              <div class="rounded-xl bg-amber-50/70 border border-amber-100 px-3.5 py-2.5">
+                <div class="text-[11px] font-semibold text-amber-700">Avg Saves (Winners)</div>
+                <div id="winnerStatAvgSaves" class="text-xl font-extrabold text-amber-700 mt-0.5 font-mono">0</div>
+              </div>
+            </div>
+
+            <!-- Toolbar: Quick Search, Sort, View Toggle -->
+            <div class="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100">
+              <div class="flex items-center gap-2.5 flex-wrap">
+                <div class="relative">
+                  <i class="ph ph-funnel-simple text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 text-xs"></i>
+                  <input type="text" id="winnerQuickFilterInput" oninput="renderWinnerPins()" placeholder="Filter by title, domain, pinner..." class="pl-7 pr-3 py-1.5 rounded-lg border border-slate-200 text-xs text-slate-700 w-56 focus:outline-none focus:ring-1 focus:ring-pink-500 focus:border-pink-500">
+                </div>
+                <div class="flex items-center gap-1.5 text-xs">
+                  <label for="winnerSortSelect" class="font-semibold text-slate-600">Sort:</label>
+                  <select id="winnerSortSelect" onchange="renderWinnerPins()" class="px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs bg-white text-slate-800 font-medium focus:outline-none focus:ring-1 focus:ring-pink-500">
+                    <option value="saves_desc" selected>Most Saves</option>
+                    <option value="velocity_desc">Saves / Day (Velocity)</option>
+                    <option value="newest">Newest First</option>
+                    <option value="reactions_desc">Most Reactions</option>
+                    <option value="comments_desc">Most Comments</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="flex items-center gap-1 bg-slate-100 p-1 rounded-lg border border-slate-200">
+                <button type="button" id="winnerViewGridBtn" onclick="setWinnerViewMode('grid')" class="px-2.5 py-1 rounded-md text-xs font-semibold bg-white text-slate-900 shadow-xs flex items-center gap-1 transition-all">
+                  <i class="ph-bold ph-squares-four"></i> Cards
+                </button>
+                <button type="button" id="winnerViewTableBtn" onclick="setWinnerViewMode('table')" class="px-2.5 py-1 rounded-md text-xs font-semibold text-slate-600 hover:text-slate-900 flex items-center gap-1 transition-all">
+                  <i class="ph-bold ph-table"></i> Table
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Active Filter Summary Bar -->
+          <div id="winnerActiveFilterSummary" class="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 rounded-xl bg-white border border-slate-200 text-xs text-slate-600">
+            <div class="flex items-center gap-2 flex-wrap" id="winnerActiveFilterBadges">
+              <!-- Populated dynamically -->
+            </div>
+            <span id="winnerShowingCountText" class="font-semibold text-slate-700">Showing 0 pins</span>
+          </div>
+
+          <!-- Visual Pin Cards Grid View -->
+          <div id="winnerPinsGrid" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
+            <div class="col-span-full bg-white rounded-2xl border border-dashed border-slate-300 py-16 px-6 text-center space-y-2.5">
+              <div class="w-14 h-14 mx-auto rounded-2xl bg-pink-50 text-pink-600 flex items-center justify-center">
+                <i class="ph-bold ph-trophy text-3xl"></i>
+              </div>
+              <h3 class="text-base font-bold text-slate-800">Discover Winner Pins for Any Keyword</h3>
+              <p class="text-xs text-slate-500 max-w-md mx-auto">Enter a keyword on the left and configure your Feed Filter (Minimum Saves, Created Within, Pin with Link) to isolate high-performing Pinterest pins.</p>
+            </div>
+          </div>
+
+          <!-- Table View (Hidden by default) -->
+          <div id="winnerPinsTableWrap" class="hidden bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+            <div class="overflow-x-auto custom-scrollbar max-h-[680px]">
+              <table class="w-full text-left border-collapse text-xs">
+                <thead class="sticky top-0 bg-slate-100/95 backdrop-blur-xs z-10 border-b border-slate-200 text-[11px] font-semibold text-slate-600 uppercase">
+                  <tr>
+                    <th class="py-2.5 px-3 w-12 text-center">#</th>
+                    <th class="py-2.5 px-3 w-16 text-center">Pin</th>
+                    <th class="py-2.5 px-3 min-w-[220px]">Title &amp; Status</th>
+                    <th class="py-2.5 px-3 text-center">Saves</th>
+                    <th class="py-2.5 px-3 text-center">Saves/Day</th>
+                    <th class="py-2.5 px-3 text-center">Created / Age</th>
+                    <th class="py-2.5 px-3">Destination Link</th>
+                    <th class="py-2.5 px-3 text-center">Reactions</th>
+                    <th class="py-2.5 px-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="winnerPinsTableBody" class="divide-y divide-slate-100">
+                  <tr><td colspan="9" class="py-12 text-center text-slate-400">No pins scanned yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Scan More Footer Button -->
+          <div id="winnerLoadMoreWrap" class="hidden flex justify-center pt-1">
+            <button type="button" id="winnerLoadMoreBtn" onclick="startWinnerPinsSearch(true)" class="px-5 py-2.5 rounded-xl bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 shadow-xs text-xs font-bold flex items-center gap-2 transition-colors">
+              <i class="ph-bold ph-plus-circle text-pink-600 text-base"></i>
+              <span>Scan More Pins for This Keyword</span>
+            </button>
+          </div>
+
         </div>
       </div>
     </section>

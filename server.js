@@ -630,11 +630,60 @@ function formatPin(p) {
 // ----------------------------------------------------------------------
 // 2. PINS ANALYZER (Delphi Pin Inspector 2 Parity)
 // ----------------------------------------------------------------------
-async function harvestNumericPinIds(phrase, targetCount, isVideo, session) {
-  let bookmark = '';
+const PINTEREST_COUNTRY_CONFIGS = {
+  US: { code: 'US', locale: 'en-US', domain: 'www.pinterest.com', label: 'United States' },
+  GB: { code: 'GB', locale: 'en-GB', domain: 'www.pinterest.co.uk', label: 'United Kingdom' },
+  CA: { code: 'CA', locale: 'en-CA', domain: 'www.pinterest.ca', label: 'Canada' },
+  AU: { code: 'AU', locale: 'en-AU', domain: 'www.pinterest.com.au', label: 'Australia' },
+  DE: { code: 'DE', locale: 'de-DE', domain: 'www.pinterest.de', label: 'Germany' },
+  FR: { code: 'FR', locale: 'fr-FR', domain: 'www.pinterest.fr', label: 'France' },
+  ES: { code: 'ES', locale: 'es-ES', domain: 'www.pinterest.es', label: 'Spain' },
+  IT: { code: 'IT', locale: 'it-IT', domain: 'www.pinterest.it', label: 'Italy' },
+  MX: { code: 'MX', locale: 'es-MX', domain: 'www.pinterest.com.mx', label: 'Mexico' },
+  BR: { code: 'BR', locale: 'pt-BR', domain: 'br.pinterest.com', label: 'Brazil' },
+  AR: { code: 'AR', locale: 'es-AR', domain: 'ar.pinterest.com', label: 'Argentina' },
+  CO: { code: 'CO', locale: 'es-CO', domain: 'co.pinterest.com', label: 'Colombia' },
+  CL: { code: 'CL', locale: 'es-CL', domain: 'cl.pinterest.com', label: 'Chile' },
+  NL: { code: 'NL', locale: 'nl-NL', domain: 'nl.pinterest.com', label: 'Netherlands' },
+  SE: { code: 'SE', locale: 'sv-SE', domain: 'se.pinterest.com', label: 'Sweden' },
+  PL: { code: 'PL', locale: 'pl-PL', domain: 'pl.pinterest.com', label: 'Poland' },
+  JP: { code: 'JP', locale: 'ja-JP', domain: 'www.pinterest.jp', label: 'Japan' },
+  IN: { code: 'IN', locale: 'en-IN', domain: 'in.pinterest.com', label: 'India' },
+  IE: { code: 'IE', locale: 'en-IE', domain: 'www.pinterest.ie', label: 'Ireland' },
+  NZ: { code: 'NZ', locale: 'en-NZ', domain: 'www.pinterest.nz', label: 'New Zealand' },
+};
+
+function getPinterestCountryConfig(rawCode) {
+  const code = String(rawCode || 'US').trim().toUpperCase();
+  return PINTEREST_COUNTRY_CONFIGS[code] || PINTEREST_COUNTRY_CONFIGS.US;
+}
+
+function getLocalizedRequestHeaders(session, sourceUrl, countryConfig = null) {
+  const host = countryConfig?.domain || 'www.pinterest.com';
+  const headers = getRequestHeaders(session, `https://${host}${sourceUrl}`);
+  if (countryConfig) {
+    headers['Accept-Language'] = `${countryConfig.locale},en;q=0.9`;
+    headers['Cookie'] = `${session.cookieHeader}; locale=${countryConfig.locale}; _country=${countryConfig.code}`;
+  }
+  return headers;
+}
+
+async function harvestNumericPinIdsWithCursor(
+  phrase,
+  targetCount,
+  isVideo,
+  session,
+  startBookmark = '',
+  existingIds = null,
+  overshoot = 15,
+  countryConfig = null
+) {
+  let bookmark = startBookmark || '';
   const pinIds = [];
+  const seen = existingIds || new Set();
   let page = 0;
-  const harvestTarget = targetCount + 15;
+  let emptyPages = 0;
+  const harvestTarget = targetCount + overshoot;
   const maxPages = Math.max(12, Math.ceil(harvestTarget / 20) + 5);
 
   while (pinIds.length < harvestTarget && page < maxPages) {
@@ -647,6 +696,7 @@ async function harvestNumericPinIds(phrase, targetCount, isVideo, session) {
           query: phrase,
           page_size: 25,
           fields: 'pin.id,pin.type,pin.comments(limit:0,resume:true)',
+          ...(countryConfig ? { country: countryConfig.code, locale: countryConfig.locale } : {}),
           ...(isVideo ? { format: 'video' } : {})
         },
       },
@@ -654,29 +704,69 @@ async function harvestNumericPinIds(phrase, targetCount, isVideo, session) {
     };
     const sourceUrl = '/search/pins/?q=' + encodeURIComponent(phrase);
     const searchUrl = 'https://www.pinterest.com/resource/ApiResource/get/?source_url=' + encodeURIComponent(sourceUrl) + '&data=' + encodeURIComponent(JSON.stringify(dataPayload)) + '&_=' + Date.now();
-    const res = await fetch(searchUrl, {
-      headers: getRequestHeaders(session, 'https://www.pinterest.com' + sourceUrl)
-    });
 
-    if (!res.ok) break;
+    let res = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        res = await fetch(searchUrl, {
+          headers: getLocalizedRequestHeaders(session, sourceUrl, countryConfig),
+          signal: AbortSignal.timeout(12000),
+        });
+        if (res.ok) break;
+        if ((res.status === 401 || res.status === 403) && !session.isCustom && attempt === 0) {
+          sessionCache.timestamp = 0;
+          session = await getPinterestSession();
+        }
+      } catch {
+        res = null;
+      }
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 400));
+    }
+
+    if (!res || !res.ok) break;
     const json = await res.json();
     const items = json.resource_response?.data || [];
-    bookmark = json.resource_response?.bookmark;
+    const nextBm = json.resource_response?.bookmark;
+    if (nextBm === bookmark) {
+      bookmark = '';
+      break;
+    }
+    bookmark = nextBm;
 
+    let addedOnPage = 0;
     for (const item of items) {
       let id = item.id;
       if (item.comments?.uri) {
         const m = item.comments.uri.match(/\/pins\/(\d+)\//);
         if (m) id = m[1];
       }
-      if (id && !pinIds.includes(id)) {
+      if (id && !seen.has(id)) {
+        seen.add(id);
         pinIds.push(id);
+        addedOnPage++;
         if (pinIds.length >= harvestTarget) break;
       }
     }
 
+    if (addedOnPage === 0) {
+      emptyPages++;
+      if (emptyPages >= 3) break;
+    } else {
+      emptyPages = 0;
+    }
+
     if (!bookmark || bookmark === '-end-') break;
   }
+
+  return {
+    pinIds,
+    nextBookmark: bookmark && bookmark !== '-end-' ? bookmark : '',
+    hasMore: Boolean(bookmark && bookmark !== '-end-'),
+  };
+}
+
+async function harvestNumericPinIds(phrase, targetCount, isVideo, session) {
+  const { pinIds } = await harvestNumericPinIdsWithCursor(phrase, targetCount, isVideo, session, '', null, 15);
   return pinIds;
 }
 
@@ -784,6 +874,356 @@ app.get('/api/pins', async (req, res) => {
     }
   } catch (err) {
     console.error('Pins error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message });
+    } else {
+      res.end();
+    }
+  }
+});
+
+// ----------------------------------------------------------------------
+// 2B. WINNER PIN FINDER (Keyword Pin Search with Live Feed Filter Support)
+// ----------------------------------------------------------------------
+function matchesWinnerFilter(pin, { minSaves = 0, maxDays = 0, hasLink = 'all', excludeVideo = false }) {
+  if (!pin) return false;
+  const savesNum = Number(pin.saves ?? 0) || 0;
+  if (minSaves > 0 && savesNum < minSaves) return false;
+
+  if (maxDays > 0) {
+    const ts = typeof pin.createdTimestamp === 'number'
+      ? pin.createdTimestamp
+      : Date.parse(pin.createdAt || pin.Created || pin.created || '');
+    if (!Number.isFinite(ts)) return false;
+    const ageDays = (Date.now() - ts) / 86400000;
+    if (ageDays > maxDays) return false;
+  }
+
+  const pinHasLink = Boolean(
+    pin.hasLink ||
+    (pin.link && typeof pin.link === 'string' && pin.link.trim() && pin.link.trim().toLowerCase() !== 'not-given')
+  );
+  if (hasLink === 'yes' && !pinHasLink) return false;
+  if (hasLink === 'no' && pinHasLink) return false;
+
+  if (excludeVideo) {
+    const pinIsVideo = Boolean(
+      pin.isVideo ||
+      pin['Is Video'] === 'YES' ||
+      pin.videoUrl ||
+      (pin['Video link'] && pin['Video link'] !== 'not-given')
+    );
+    if (pinIsVideo) return false;
+  }
+
+  return true;
+}
+
+// Expand a seed keyword into related Pinterest search queries via Typeahead
+// so 1k / 5k / 10k scans can surpass Pinterest's ~950-pin cap per exact query
+async function getExpandedWinnerQueries(baseQuery, session, countryConfig = null) {
+  const cachePrefix = countryConfig ? `${countryConfig.code}:` : '';
+  const fetchSuggestions = async (term) => {
+    const cacheKey = `${cachePrefix}${term}`;
+    const cached = getCachedTypeahead(cacheKey);
+    if (cached) return cached;
+
+    const params = new URLSearchParams({
+      source_url: '/search/pins/?q=&rs=typed&term_meta[]=',
+      data: JSON.stringify({ options: { count: 10, term }, context: {} }),
+      _: Date.now().toString(),
+    });
+    try {
+      const sourceUrl = `/search/pins/?q=${encodeURIComponent(term)}`;
+      const response = await fetch(
+        `https://www.pinterest.com/resource/AdvancedTypeaheadResource/get/?${params.toString()}`,
+        {
+          headers: getLocalizedRequestHeaders(session, sourceUrl, countryConfig),
+          signal: AbortSignal.timeout(8000),
+        }
+      );
+      if (!response.ok) return [];
+      const json = await response.json();
+      const items = (json?.resource_response?.data?.items || [])
+        .filter((i) => i.query)
+        .map((i) => i.query.trim());
+      setCachedTypeahead(cacheKey, items);
+      return items;
+    } catch {
+      return [];
+    }
+  };
+
+  const letters = 'abcdefghijklmnopqrstuvwxyz'.split('');
+  const seedTerms = [baseQuery, ...letters.map((ch) => `${baseQuery} ${ch}`)];
+  const batches = await runWorkerPool(seedTerms, 10, fetchSuggestions);
+
+  const seenLower = new Set([baseQuery.toLowerCase().trim()]);
+  const expanded = [];
+  for (const list of batches) {
+    if (!Array.isArray(list)) continue;
+    for (const q of list) {
+      const lower = q.toLowerCase();
+      if (q && !seenLower.has(lower)) {
+        seenLower.add(lower);
+        expanded.push(q);
+      }
+    }
+  }
+
+  // Fallback broad modifiers if Pinterest typeahead returns few variations
+  const fallbackMods = [
+    'aesthetic', 'modern', 'cozy', 'simple', 'inspiration', 'design',
+    'diy', 'small', 'minimalist', 'luxury', 'trending', 'best', 'decor', 'tips', 'style'
+  ];
+  for (const mod of fallbackMods) {
+    const candidate = `${baseQuery} ${mod}`;
+    if (!seenLower.has(candidate.toLowerCase())) {
+      seenLower.add(candidate.toLowerCase());
+      expanded.push(candidate);
+    }
+  }
+
+  return expanded;
+}
+
+app.get('/api/winner-pins', async (req, res) => {
+  try {
+    const query = (req.query.query || '').trim();
+    const rawCount = parseInt(req.query.count || req.query.scanCount || '100', 10);
+    const targetCount = Math.min(10000, Math.max(10, Number.isFinite(rawCount) ? rawCount : 100));
+    const searchIn = (req.query.searchIn || 'pins').toLowerCase();
+    const isVideoOnly = searchIn === 'videos' || req.query.isVideo === 'true';
+    const isExcludeVideos = searchIn === 'exclude-videos' || req.query.excludeVideo === 'true';
+    const countryConfig = getPinterestCountryConfig(req.query.country || 'US');
+    const startBookmark = (req.query.bookmark || '').trim();
+    const stream = req.query.stream === 'true';
+    const minSaves = Math.max(0, parseInt(req.query.minSaves || '0', 10) || 0);
+    const maxDays = Math.max(0, parseInt(req.query.maxDays || '0', 10) || 0);
+    const hasLink = (req.query.hasLink || 'all').toLowerCase();
+
+    if (!query) return res.status(400).json({ error: 'Query is required' });
+
+    const matchesPinType = (pin) => {
+      if (!pin) return false;
+      const pinIsVideo = Boolean(
+        pin.isVideo ||
+        pin['Is Video'] === 'YES' ||
+        pin.videoUrl ||
+        (pin['Video link'] && pin['Video link'] !== 'not-given')
+      );
+      if (isExcludeVideos && pinIsVideo) return false;
+      if (isVideoOnly && !pinIsVideo) return false;
+      return true;
+    };
+
+    const session = await getPinterestSession();
+
+    if (stream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      if (res.flushHeaders) res.flushHeaders();
+
+      let clientDisconnected = false;
+      req.on('close', () => {
+        clientDisconnected = true;
+      });
+
+      res.write(`data: ${JSON.stringify({
+        type: 'start',
+        query,
+        targetCount,
+        searchIn,
+        country: countryConfig.code,
+        countryLabel: countryConfig.label,
+      })}\n\n`);
+
+      let scanned = 0;
+      let currentBookmark = startBookmark;
+      let primaryHasMore = true;
+      const seenPinIds = new Set();
+      const batchSize = targetCount > 150 ? 100 : targetCount;
+      const concurrency = targetCount >= 1000 ? 16 : 12;
+
+      const scanQueryFeed = async (activeQuery, initialBookmark, isExpanded, subIdx, totalSubs) => {
+        let bm = initialBookmark || '';
+        let feedHasMore = true;
+
+        while (scanned < targetCount && feedHasMore && !clientDisconnected) {
+          const remaining = targetCount - scanned;
+          const harvestCount = isExcludeVideos
+            ? Math.min(batchSize + 25, Math.max(25, Math.ceil(remaining * 1.35)))
+            : Math.min(batchSize, remaining);
+          const batch = await harvestNumericPinIdsWithCursor(
+            activeQuery,
+            harvestCount,
+            isVideoOnly,
+            session,
+            bm,
+            seenPinIds,
+            0,
+            countryConfig
+          );
+          if (clientDisconnected) return { nextBookmark: bm, hasMore: false };
+
+          bm = batch.nextBookmark;
+          feedHasMore = batch.hasMore;
+
+          const idsToScan = isExcludeVideos ? batch.pinIds : batch.pinIds.slice(0, remaining);
+          if (idsToScan.length === 0) {
+            feedHasMore = false;
+            break;
+          }
+
+          const expectedTotal = targetCount;
+          if (!isExpanded) {
+            res.write(`data: ${JSON.stringify({ type: 'harvested', total: expectedTotal, batchSize: idsToScan.length, nextBookmark: bm, hasMore: feedHasMore })}\n\n`);
+          }
+
+          let currentIndex = 0;
+          const worker = async () => {
+            while (currentIndex < idsToScan.length && scanned < targetCount && !clientDisconnected) {
+              const idx = currentIndex++;
+              const pinId = idsToScan[idx];
+              try {
+                const pin = await fetchPinDeepDetails(pinId, session);
+                if (!clientDisconnected && pin && scanned < targetCount) {
+                  if (!matchesPinType(pin)) continue;
+                  scanned++;
+                  res.write(`data: ${JSON.stringify({
+                    type: 'pin',
+                    index: scanned - 1,
+                    completed: scanned,
+                    total: expectedTotal,
+                    subquery: isExpanded ? activeQuery : '',
+                    subqueryIndex: subIdx,
+                    totalSubqueries: totalSubs,
+                    pin,
+                  })}\n\n`);
+                }
+              } catch (err) {
+                console.warn(`Error scraping winner pin ${pinId}:`, err.message);
+              }
+            }
+          };
+
+          const workers = Array.from({ length: Math.min(concurrency, idsToScan.length) }, () => worker());
+          await Promise.all(workers);
+        }
+
+        return { nextBookmark: bm, hasMore: feedHasMore };
+      };
+
+      // Phase 1: Scroll 100% of the exact seed query feed
+      const primaryResult = await scanQueryFeed(query, currentBookmark, false, 0, 0);
+      currentBookmark = primaryResult.nextBookmark;
+      primaryHasMore = primaryResult.hasMore;
+
+      // Phase 2: If targetCount wasn't reached (Pinterest caps a single query at ~950 pins),
+      // automatically expand into related Pinterest searches until targetCount is reached
+      let expandedUsed = 0;
+      if (scanned < targetCount && !clientDisconnected) {
+        res.write(`data: ${JSON.stringify({
+          type: 'expanding',
+          completed: scanned,
+          total: targetCount,
+          query,
+        })}\n\n`);
+
+        const subqueries = await getExpandedWinnerQueries(query, session, countryConfig);
+        const totalSubs = subqueries.length;
+
+        for (let i = 0; i < subqueries.length && scanned < targetCount && !clientDisconnected; i++) {
+          const sq = subqueries[i];
+          expandedUsed = i + 1;
+          res.write(`data: ${JSON.stringify({
+            type: 'subquery',
+            subquery: sq,
+            subqueryIndex: i + 1,
+            totalSubqueries: totalSubs,
+            completed: scanned,
+            total: targetCount,
+          })}\n\n`);
+
+          await scanQueryFeed(sq, '', true, i + 1, totalSubs);
+        }
+      }
+
+      if (!clientDisconnected) {
+        res.write(`data: ${JSON.stringify({
+          type: 'done',
+          total: scanned,
+          country: countryConfig.code,
+          countryLabel: countryConfig.label,
+          nextBookmark: currentBookmark,
+          hasMore: primaryHasMore,
+          expandedQueriesUsed: expandedUsed,
+        })}\n\n`);
+        res.end();
+      }
+    } else {
+      const seenPinIds = new Set();
+      const harvestGoal = isExcludeVideos ? Math.min(10000, Math.ceil(targetCount * 1.4)) : targetCount;
+      const firstBatch = await harvestNumericPinIdsWithCursor(
+        query,
+        harvestGoal,
+        isVideoOnly,
+        session,
+        startBookmark,
+        seenPinIds,
+        0,
+        countryConfig
+      );
+      let allPinIds = [...firstBatch.pinIds];
+
+      if (allPinIds.length < harvestGoal) {
+        const subqueries = await getExpandedWinnerQueries(query, session, countryConfig);
+        for (const sq of subqueries) {
+          if (allPinIds.length >= harvestGoal) break;
+          const next = await harvestNumericPinIdsWithCursor(
+            sq,
+            harvestGoal - allPinIds.length,
+            isVideoOnly,
+            session,
+            '',
+            seenPinIds,
+            0,
+            countryConfig
+          );
+          allPinIds.push(...next.pinIds);
+        }
+      }
+
+      const idsToScan = allPinIds.slice(0, harvestGoal);
+      const scannedPins = (
+        await runWorkerPool(idsToScan, 14, async (pinId) => {
+          try {
+            return await fetchPinDeepDetails(pinId, session);
+          } catch {
+            return null;
+          }
+        })
+      ).filter((pin) => pin && matchesPinType(pin)).slice(0, targetCount);
+
+      const winners = scannedPins.filter((pin) =>
+        matchesWinnerFilter(pin, { minSaves, maxDays, hasLink, excludeVideo: isExcludeVideos })
+      );
+
+      res.json({
+        query,
+        searchIn,
+        country: countryConfig.code,
+        countryLabel: countryConfig.label,
+        scanned: scannedPins.length,
+        total: winners.length,
+        nextBookmark: firstBatch.nextBookmark,
+        hasMore: firstBatch.hasMore,
+        pins: winners,
+      });
+    }
+  } catch (err) {
+    console.error('Winner pins error:', err);
     if (!res.headersSent) {
       res.status(500).json({ error: err.message });
     } else {
@@ -1643,6 +2083,67 @@ function detectPinAiStatus(d, rawAnn = [], hashtags = '') {
   };
 }
 
+function extractPinVideoInfo(d) {
+  if (!d || typeof d !== 'object') {
+    return { isVideo: false, videoUrl: null, videoDuration: 0, videoThumbnail: null };
+  }
+
+  const pickVideoEntry = (videoList) => {
+    if (!videoList || typeof videoList !== 'object') return null;
+    if (videoList.V_720P && videoList.V_720P.url) return videoList.V_720P;
+    for (const val of Object.values(videoList)) {
+      if (val && typeof val === 'object' && val.url) return val;
+    }
+    return null;
+  };
+
+  let primaryVideo = pickVideoEntry(d.videos?.video_list);
+  let hasStoryVideoBlock = false;
+
+  const pages = d.story_pin_data?.pages;
+  if (Array.isArray(pages)) {
+    for (const page of pages) {
+      const blocks = page?.blocks;
+      if (!Array.isArray(blocks)) continue;
+      for (const block of blocks) {
+        if (!block || typeof block !== 'object') continue;
+        const blockVideo = pickVideoEntry(block.video?.video_list);
+        if (
+          blockVideo ||
+          block.type === 'story_pin_video_block' ||
+          block.block_type === 3 ||
+          Boolean(block.video_signature) ||
+          Boolean(block.video)
+        ) {
+          hasStoryVideoBlock = true;
+          if (!primaryVideo && blockVideo) primaryVideo = blockVideo;
+        }
+      }
+    }
+  }
+
+  const storyDurationMs = Number(d.story_pin_data?.total_video_duration) || 0;
+  const isVideo = Boolean(
+    d.is_video ||
+    primaryVideo ||
+    hasStoryVideoBlock ||
+    d.story_pin_data?.has_video ||
+    storyDurationMs > 0 ||
+    d.embed?.type === 'video' ||
+    (d.video_status && d.video_status !== 'not-given')
+  );
+
+  const rawDurationMs = Number(primaryVideo?.duration) || storyDurationMs || 0;
+  const videoDuration = rawDurationMs > 0 ? Math.round(rawDurationMs / 1000) : 0;
+
+  return {
+    isVideo,
+    videoUrl: primaryVideo?.url || null,
+    videoDuration,
+    videoThumbnail: primaryVideo?.thumbnail || null,
+  };
+}
+
 async function fetchPinDeepDetails(pinIdentifier, session) {
   const cleanId = cleanPinId(pinIdentifier);
   if (!cleanId) return null;
@@ -1659,7 +2160,7 @@ async function fetchPinDeepDetails(pinIdentifier, session) {
     _: Date.now().toString(),
   });
 
-  const response = await fetch(
+  let response = await fetch(
     `https://www.pinterest.com/resource/PinResource/get/?${params.toString()}`,
     {
       headers: getRequestHeaders(session, `https://www.pinterest.com/pin/${cleanId}/`),
@@ -1667,13 +2168,30 @@ async function fetchPinDeepDetails(pinIdentifier, session) {
     }
   );
 
+  if ((response.status === 401 || response.status === 403) && !session.isCustom) {
+    sessionCache.timestamp = 0;
+    const freshSession = await getPinterestSession();
+    response = await fetch(
+      `https://www.pinterest.com/resource/PinResource/get/?${params.toString()}`,
+      {
+        headers: getRequestHeaders(freshSession, `https://www.pinterest.com/pin/${cleanId}/`),
+        signal: AbortSignal.timeout(15000),
+      }
+    );
+  }
+
+  // Deleted, private, or removed pins frequently appear in Pinterest search feeds; skip them cleanly
+  if (response.status === 404 || response.status === 410 || response.status === 403) {
+    return null;
+  }
+
   if (!response.ok) {
     throw new Error(`PinResource returned status ${response.status} for pin ${cleanId}`);
   }
 
   const json = await response.json();
   const d = json?.resource_response?.data;
-  if (!d) throw new Error(`No data returned for pin ${cleanId}`);
+  if (!d) return null;
 
   const pinner = d.pinner || {};
   const board = d.board || {};
@@ -1682,8 +2200,7 @@ async function fetchPinDeepDetails(pinIdentifier, session) {
   const rx = d.reaction_counts || {};
   const stats = d.aggregated_pin_data?.aggregated_stats || {};
   const { origImg, thumbImg } = extractPinImageUrls(d);
-  const videos = d.videos?.video_list || {};
-  const video720 = videos.V_720P || Object.values(videos)[0] || null;
+  const videoInfo = extractPinVideoInfo(d);
 
   const { love, goodIdea, wow, haha: laughing, thanks, totalReactions } = extractNormalizedReactions(rx);
 
@@ -1716,6 +2233,12 @@ async function fetchPinDeepDetails(pinIdentifier, session) {
 
   const rawCreatedAt = d.created_at || '';
   const formattedCreated = fmtDate(rawCreatedAt);
+  const parsedCreatedTs = rawCreatedAt ? Date.parse(rawCreatedAt) : NaN;
+  const createdTimestamp = Number.isFinite(parsedCreatedTs) ? parsedCreatedTs : null;
+  const cleanLink =
+    d.link && typeof d.link === 'string' && d.link.trim() && d.link.trim().toLowerCase() !== 'not-given'
+      ? d.link.trim()
+      : '';
   const rawSaves = stats.saves !== undefined ? Number(stats.saves) : (Number(d.repin_count) || 0);
   const aiInfo = detectPinAiStatus(d, rawAnn, hashtags);
 
@@ -1739,21 +2262,21 @@ async function fetchPinDeepDetails(pinIdentifier, session) {
     'Hashtags': hashtags,
     'Created': formattedCreated,
     'Method': d.method || 'pinterest_platform',
-    'Domain': d.domain || (d.link ? safeHostname(d.link) : 'not-given'),
+    'Domain': d.domain || (cleanLink ? safeHostname(cleanLink) : 'not-given'),
     'Site Name': d.rich_summary?.site_name || 'not-given',
-    'Link': d.link || 'not-given',
+    'Link': cleanLink || 'not-given',
     'Dominant Color': d.dominant_color || 'not-given',
     'Image Signature': d.image_signature || 'not-given',
     'Pin Join ID': d.pin_join?.id || 'not-given',
     'Is Repin': d.is_repin ? 'YES' : 'NO',
     'Is Promoted': d.is_promoted ? 'YES' : 'NO',
-    'Is Video': d.is_video ? 'YES' : 'NO',
+    'Is Video': videoInfo.isVideo ? 'YES' : 'NO',
     'Is Story': d.story_pin_data_id ? 'YES' : 'NO',
     'Is Group Board': isGroupBoard,
     'Is AI Modified': aiInfo.isAi ? 'YES' : 'NO',
-    'Video link': video720?.url || 'not-given',
-    'Video Length': video720?.duration ? Math.round(video720.duration / 1000) : 'not-given',
-    'Video Thumbnail': video720?.thumbnail || 'not-given',
+    'Video link': videoInfo.videoUrl || 'not-given',
+    'Video Length': videoInfo.videoDuration > 0 ? videoInfo.videoDuration : 'not-given',
+    'Video Thumbnail': videoInfo.videoThumbnail || 'not-given',
     'Pinner Image': pinner.image_medium_url || pinner.image_large_url || pinner.image_small_url || 'not-given',
     'Pinner Username': pinner.username || 'not-given',
     'Pinner Name': pinner.full_name || 'not-given',
@@ -1781,22 +2304,29 @@ async function fetchPinDeepDetails(pinIdentifier, session) {
     // Standard properties for UI tables
     id: String(cleanId),
     title: d.title || d.grid_title || d.rich_summary?.display_name || 'Untitled Pin',
+    description: d.description || d.auto_alt_text || '',
     image: origImg,
     thumbnail: thumbImg,
     saves: stats.saves !== undefined ? Number(stats.saves) : (Number(d.repin_count) || 0),
+    comments: Number(d.aggregated_pin_data?.comment_count || d.comment_count) || 0,
     reactionCount: totalReactions,
     totalReactions,
     reactions: { love, goodIdea, wow, haha: laughing, thanks },
     url: `https://www.pinterest.com/pin/${cleanId}/`,
     pinUrl: `https://www.pinterest.com/pin/${cleanId}/`,
+    link: cleanLink,
+    hasLink: Boolean(cleanLink),
     boardName: board.name || '',
     boardUrl: board.url ? (board.url.startsWith('http') ? board.url : `https://www.pinterest.com${board.url}`) : '',
     pinnerUsername: pinner.username || '',
-    domain: d.domain || (d.link ? safeHostname(d.link) : 'not-given'),
+    pinnerName: pinner.full_name || pinner.username || '',
+    domain: d.domain || (cleanLink ? safeHostname(cleanLink) : 'not-given'),
     created: formattedCreated,
-    isVideo: !!d.is_video,
-    videoDuration: video720?.duration ? Math.round(video720.duration / 1000) : 0,
-    videoUrl: video720?.url || null,
+    createdAt: rawCreatedAt,
+    createdTimestamp,
+    isVideo: videoInfo.isVideo,
+    videoDuration: videoInfo.videoDuration,
+    videoUrl: videoInfo.videoUrl,
     isAiModified: aiInfo.isAi,
     aiType: aiInfo.type,
     aiConfidence: aiInfo.confidence,

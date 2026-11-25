@@ -58,6 +58,27 @@ const state = {
   pinsAbortController: null,
   usersImageSize: 25,
   boardsImageSize: 30,
+
+  // Winner Pin Finder State
+  winnerPins: [],
+  winnerQuery: '',
+  winnerRunning: false,
+  winnerCancelled: false,
+  winnerAbortController: null,
+  winnerNextBookmark: '',
+  winnerHasMore: false,
+  winnerViewMode: 'grid',
+  winnerRenderLimit: 200,
+  winnerCurrentSubquery: '',
+  winnerPinType: 'pins',
+  winnerCountry: 'US',
+  winnerFilter: {
+    enabled: true,
+    minSaves: 15,
+    maxDays: 28,
+    hasLink: 'yes',
+    action: 'hide',
+  },
 };
 
 // Global Chart instance
@@ -76,6 +97,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   applyAllSavedColumns();
   initCategoriesChecklist();
+  syncWinnerFilterUI();
+  renderWinnerPins();
 });
 
 // Check Server Session Status
@@ -115,6 +138,9 @@ function switchTab(tabId) {
 
   if (tabId === 'trends') {
     renderTrends();
+  } else if (tabId === 'winner') {
+    syncWinnerFilterUI();
+    renderWinnerPins();
   }
 }
 
@@ -3896,6 +3922,11 @@ function saveProjectFile() {
     users: state.users,
     annotations: state.annotations,
     trends: state.trends,
+    winnerPins: state.winnerPins,
+    winnerQuery: state.winnerQuery,
+    winnerPinType: state.winnerPinType,
+    winnerCountry: state.winnerCountry,
+    winnerFilter: state.winnerFilter,
     filters: state.filters,
     currentPinsQuery: state.currentPinsQuery,
   };
@@ -3918,6 +3949,26 @@ function loadProjectFile(event) {
       if (data.users) state.users = data.users;
       if (data.annotations) state.annotations = data.annotations;
       if (data.trends) state.trends = data.trends;
+      if (Array.isArray(data.winnerPins)) state.winnerPins = data.winnerPins;
+      if (typeof data.winnerQuery === 'string') {
+        state.winnerQuery = data.winnerQuery;
+        const wkInput = document.getElementById('winnerKeywordInput');
+        if (wkInput) wkInput.value = data.winnerQuery;
+      }
+      if (typeof data.winnerPinType === 'string') {
+        state.winnerPinType = data.winnerPinType;
+        const ptSelect = document.getElementById('winnerSearchInSelect');
+        if (ptSelect) ptSelect.value = data.winnerPinType;
+      }
+      if (typeof data.winnerCountry === 'string') {
+        state.winnerCountry = data.winnerCountry;
+        const cSelect = document.getElementById('winnerCountrySelect');
+        if (cSelect) cSelect.value = data.winnerCountry;
+      }
+      if (data.winnerFilter && typeof data.winnerFilter === 'object') {
+        state.winnerFilter = { ...state.winnerFilter, ...data.winnerFilter };
+        applyWinnerFilterToControls();
+      }
       if (data.filters) state.filters = data.filters;
       if (data.currentPinsQuery) state.currentPinsQuery = data.currentPinsQuery;
 
@@ -3927,6 +3978,7 @@ function loadProjectFile(event) {
       renderUsers();
       renderAnnotations();
       renderTrends();
+      renderWinnerPins();
 
       alert('Project session restored successfully!');
     } catch (err) {
@@ -6593,6 +6645,949 @@ function onPositionCountryChange(countryVal) {
     checkPinPosition();
   }
 }
+
+// ======================================================================
+// 8. WINNER PIN FINDER (Keyword Pin Search + Live Feed Filter)
+// ======================================================================
+
+function parseWinnerPinSaves(p) {
+  if (!p) return 0;
+  if (typeof p.saves === 'number' && Number.isFinite(p.saves)) return p.saves;
+  const raw = p.Saves ?? p.saves ?? p.Repins ?? 0;
+  const num = Number(String(raw).replace(/,/g, ''));
+  return Number.isFinite(num) ? num : 0;
+}
+
+function parseWinnerPinCreatedTs(p) {
+  if (!p) return null;
+  if (typeof p.createdTimestamp === 'number' && Number.isFinite(p.createdTimestamp)) {
+    return p.createdTimestamp;
+  }
+  const raw = p.createdAt || p.Created || p.created || '';
+  if (!raw || raw === 'not-given') return null;
+  let ts = Date.parse(raw);
+  if (!Number.isFinite(ts)) {
+    ts = Date.parse(`${raw} UTC`);
+  }
+  return Number.isFinite(ts) ? ts : null;
+}
+
+function getWinnerPinLink(p) {
+  if (!p) return '';
+  const raw = p.link || p.Link || '';
+  if (typeof raw !== 'string') return '';
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'not-given') return '';
+  if (!/^https?:\/\//i.test(trimmed)) return '';
+  return trimmed;
+}
+
+function bookmarkWinnerPin(pinId) {
+  const pin = state.winnerPins.find((p) => String(p.id || p['Pin ID'] || '') === String(pinId));
+  if (!pin) return;
+  const id = String(pin.id || pin['Pin ID'] || pinId);
+  const title = pin.title || pin.Title || 'Untitled Pin';
+  const url = pin.pinUrl || pin.url || pin['main link'] || `https://www.pinterest.com/pin/${id}/`;
+  addBookmark('pin', { id, title, url });
+}
+
+function formatWinnerAgeLabel(ageDays) {
+  if (ageDays === null || !Number.isFinite(ageDays)) return 'Unknown date';
+  if (ageDays < 1) {
+    const hrs = Math.max(1, Math.round(ageDays * 24));
+    return `${hrs}h ago`;
+  }
+  if (ageDays < 60) return `${Math.round(ageDays)}d ago`;
+  if (ageDays < 365) return `${Math.round(ageDays / 30)}mo ago`;
+  return `${(ageDays / 365).toFixed(1)}y ago`;
+}
+
+function isWinnerPinVideo(pin) {
+  if (!pin) return false;
+  return Boolean(
+    pin.isVideo ||
+    pin['Is Video'] === 'YES' ||
+    pin.videoUrl ||
+    (pin['Video link'] && pin['Video link'] !== 'not-given')
+  );
+}
+
+function matchesWinnerPinType(pin) {
+  const pinType = state.winnerPinType || document.getElementById('winnerSearchInSelect')?.value || 'pins';
+  const isVideo = isWinnerPinVideo(pin);
+  if (pinType === 'exclude-videos') return !isVideo;
+  if (pinType === 'videos') return isVideo;
+  return true;
+}
+
+function evaluateWinnerPin(pin) {
+  const f = state.winnerFilter;
+  const saves = parseWinnerPinSaves(pin);
+  const createdTs = parseWinnerPinCreatedTs(pin);
+  const ageDays = createdTs !== null ? Math.max(0, (Date.now() - createdTs) / 86400000) : null;
+  const link = getWinnerPinLink(pin);
+  const hasLink = Boolean(link);
+  const isVideo = isWinnerPinVideo(pin);
+  const savesPerDay = ageDays !== null ? saves / Math.max(1, ageDays) : null;
+  const reactions = Number(pin.totalReactions ?? pin.reactionCount ?? pin['Total Reactions'] ?? 0) || 0;
+  const comments = Number(pin.comments ?? pin.Comments ?? 0) || 0;
+
+  const reasons = [];
+  if (f.enabled) {
+    if (f.minSaves > 0 && saves < f.minSaves) {
+      reasons.push(`Saves < ${f.minSaves.toLocaleString()}`);
+    }
+    if (f.maxDays > 0) {
+      if (ageDays === null) {
+        reasons.push('No date');
+      } else if (ageDays > f.maxDays) {
+        reasons.push(`Older than ${f.maxDays}d`);
+      }
+    }
+    if (f.hasLink === 'yes' && !hasLink) {
+      reasons.push('No link');
+    } else if (f.hasLink === 'no' && hasLink) {
+      reasons.push('Has link');
+    }
+  }
+
+  return {
+    pin,
+    matches: reasons.length === 0,
+    reasons,
+    saves,
+    createdTs,
+    ageDays,
+    savesPerDay,
+    link,
+    hasLink,
+    isVideo,
+    reactions,
+    comments,
+  };
+}
+
+function applyWinnerFilterToControls() {
+  const f = state.winnerFilter;
+  const enableEl = document.getElementById('winnerEnableFilter');
+  const minSavesEl = document.getElementById('winnerMinSavesInput');
+  const maxDaysEl = document.getElementById('winnerMaxDaysInput');
+
+  if (enableEl) enableEl.checked = Boolean(f.enabled);
+  if (minSavesEl) minSavesEl.value = String(f.minSaves ?? 0);
+  if (maxDaysEl) maxDaysEl.value = String(f.maxDays ?? 0);
+
+  document.querySelectorAll('input[name="winnerHasLink"]').forEach((radio) => {
+    radio.checked = radio.value === f.hasLink;
+  });
+  document.querySelectorAll('input[name="winnerFilterAction"]').forEach((radio) => {
+    radio.checked = radio.value === f.action;
+  });
+
+  syncWinnerFilterUI();
+}
+
+function readWinnerFilterFromControls() {
+  const enableEl = document.getElementById('winnerEnableFilter');
+  const minSavesEl = document.getElementById('winnerMinSavesInput');
+  const maxDaysEl = document.getElementById('winnerMaxDaysInput');
+  const hasLinkEl = document.querySelector('input[name="winnerHasLink"]:checked');
+  const actionEl = document.querySelector('input[name="winnerFilterAction"]:checked');
+  const pinTypeEl = document.getElementById('winnerSearchInSelect');
+
+  const rawMinSaves = parseInt(minSavesEl?.value ?? '0', 10);
+  const rawMaxDays = parseInt(maxDaysEl?.value ?? '0', 10);
+
+  if (pinTypeEl) {
+    state.winnerPinType = pinTypeEl.value || 'pins';
+  }
+
+  state.winnerFilter = {
+    enabled: enableEl ? enableEl.checked : true,
+    minSaves: Number.isFinite(rawMinSaves) && rawMinSaves > 0 ? rawMinSaves : 0,
+    maxDays: Number.isFinite(rawMaxDays) && rawMaxDays > 0 ? rawMaxDays : 0,
+    hasLink: hasLinkEl ? hasLinkEl.value : 'yes',
+    action: actionEl ? actionEl.value : 'hide',
+  };
+}
+
+function onWinnerPinTypeChange() {
+  const pinTypeEl = document.getElementById('winnerSearchInSelect');
+  state.winnerPinType = pinTypeEl ? (pinTypeEl.value || 'pins') : 'pins';
+  state.winnerRenderLimit = 200;
+  syncWinnerFilterUI();
+  renderWinnerPins();
+}
+
+function onWinnerCountryChange() {
+  const countryEl = document.getElementById('winnerCountrySelect');
+  state.winnerCountry = countryEl ? (countryEl.value || 'US') : 'US';
+  state.winnerNextBookmark = '';
+  syncWinnerFilterUI();
+}
+
+function syncWinnerFilterUI() {
+  const f = state.winnerFilter;
+  const pinType = state.winnerPinType || document.getElementById('winnerSearchInSelect')?.value || 'pins';
+  const country = state.winnerCountry || document.getElementById('winnerCountrySelect')?.value || 'US';
+  const minSavesDisplay = document.getElementById('winnerMinSavesDisplay');
+  const maxDaysDisplay = document.getElementById('winnerMaxDaysDisplay');
+  const hasLinkDisplay = document.getElementById('winnerHasLinkDisplay');
+  const fieldsWrap = document.getElementById('winnerFilterFieldsWrap');
+
+  if (minSavesDisplay) {
+    minSavesDisplay.textContent = f.minSaves > 0 ? `≥ ${f.minSaves.toLocaleString()}` : 'Any';
+  }
+  if (maxDaysDisplay) {
+    if (f.maxDays === 0) maxDaysDisplay.textContent = 'All';
+    else if (f.maxDays === 1) maxDaysDisplay.textContent = '< 1 day';
+    else maxDaysDisplay.textContent = `< ${f.maxDays} days`;
+  }
+  if (hasLinkDisplay) {
+    if (f.hasLink === 'yes') hasLinkDisplay.textContent = 'Yes (Has Link)';
+    else if (f.hasLink === 'no') hasLinkDisplay.textContent = 'No (No Link)';
+    else hasLinkDisplay.textContent = 'All';
+  }
+  if (fieldsWrap) {
+    fieldsWrap.classList.toggle('opacity-50', !f.enabled);
+  }
+
+  document.querySelectorAll('.winner-saves-chip').forEach((btn) => {
+    const val = parseInt(btn.getAttribute('data-winner-saves') || '0', 10);
+    const active = val === f.minSaves;
+    btn.className = active
+      ? 'winner-saves-chip px-2.5 py-1.5 rounded-lg border border-pink-400 bg-pink-50 text-xs font-bold text-pink-700 transition-colors'
+      : 'winner-saves-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors';
+  });
+
+  document.querySelectorAll('.winner-days-chip').forEach((btn) => {
+    const val = parseInt(btn.getAttribute('data-winner-days') || '0', 10);
+    const active = val === f.maxDays;
+    btn.className = active
+      ? 'winner-days-chip px-2.5 py-1.5 rounded-lg border border-pink-400 bg-pink-50 text-xs font-bold text-pink-700 transition-colors'
+      : 'winner-days-chip px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 transition-colors';
+  });
+
+  const badgesEl = document.getElementById('winnerActiveFilterBadges');
+  if (badgesEl) {
+    const parts = [];
+    parts.push(`<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold"><i class="ph ph-globe"></i> Country: ${escapeHtml(country)}</span>`);
+    if (pinType === 'exclude-videos') {
+      parts.push(`<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-rose-50 text-rose-700 border border-rose-200 font-semibold"><i class="ph ph-video-camera-slash"></i> Pin Type: Exclude Video</span>`);
+    } else if (pinType === 'videos') {
+      parts.push(`<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-purple-50 text-purple-700 border border-purple-200 font-semibold"><i class="ph ph-video-camera"></i> Pin Type: Videos Only</span>`);
+    }
+
+    if (!f.enabled) {
+      parts.push(`<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-100 text-slate-600 font-semibold"><i class="ph ph-funnel-x"></i> Filter Disabled (Showing All Scanned Pins)</span>`);
+    } else {
+      parts.push(`<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-pink-50 text-pink-700 border border-pink-100 font-semibold"><i class="ph-bold ph-funnel"></i> Saves: ${f.minSaves > 0 ? `≥ ${f.minSaves.toLocaleString()}` : 'Any'}</span>`);
+      parts.push(`<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-pink-50 text-pink-700 border border-pink-100 font-semibold"><i class="ph ph-clock"></i> Created: ${f.maxDays > 0 ? `< ${f.maxDays}d` : 'All'}</span>`);
+      const linkLabel = f.hasLink === 'yes' ? 'Has Link' : (f.hasLink === 'no' ? 'No Link' : 'All');
+      parts.push(`<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-blue-50 text-blue-700 border border-blue-100 font-semibold"><i class="ph ph-link"></i> Link: ${linkLabel}</span>`);
+      parts.push(`<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 font-semibold">${f.action === 'hide' ? 'Hide non-matching' : 'Dim non-matching'}</span>`);
+    }
+    badgesEl.innerHTML = parts.join('');
+  }
+}
+
+function onWinnerFilterChange() {
+  readWinnerFilterFromControls();
+  state.winnerRenderLimit = 200;
+  syncWinnerFilterUI();
+  renderWinnerPins();
+}
+
+function showMoreWinnerRendered() {
+  state.winnerRenderLimit = (state.winnerRenderLimit || 200) + 200;
+  renderWinnerPins();
+}
+
+function setWinnerMinSaves(val) {
+  const input = document.getElementById('winnerMinSavesInput');
+  if (input) input.value = String(val);
+  onWinnerFilterChange();
+}
+
+function setWinnerMaxDays(val) {
+  const input = document.getElementById('winnerMaxDaysInput');
+  if (input) input.value = String(val);
+  onWinnerFilterChange();
+}
+
+function setWinnerFilterAction(action) {
+  document.querySelectorAll('input[name="winnerFilterAction"]').forEach((radio) => {
+    radio.checked = radio.value === action;
+  });
+  onWinnerFilterChange();
+}
+
+function resetWinnerFilter() {
+  state.winnerFilter = {
+    enabled: true,
+    minSaves: 15,
+    maxDays: 28,
+    hasLink: 'yes',
+    action: 'hide',
+  };
+  applyWinnerFilterToControls();
+  renderWinnerPins();
+}
+
+function setWinnerViewMode(mode) {
+  state.winnerViewMode = mode === 'table' ? 'table' : 'grid';
+  const gridBtn = document.getElementById('winnerViewGridBtn');
+  const tableBtn = document.getElementById('winnerViewTableBtn');
+  const gridWrap = document.getElementById('winnerPinsGrid');
+  const tableWrap = document.getElementById('winnerPinsTableWrap');
+
+  if (state.winnerViewMode === 'grid') {
+    if (gridBtn) gridBtn.className = 'px-2.5 py-1 rounded-md text-xs font-semibold bg-white text-slate-900 shadow-xs flex items-center gap-1 transition-all';
+    if (tableBtn) tableBtn.className = 'px-2.5 py-1 rounded-md text-xs font-semibold text-slate-600 hover:text-slate-900 flex items-center gap-1 transition-all';
+    gridWrap?.classList.remove('hidden');
+    tableWrap?.classList.add('hidden');
+  } else {
+    if (tableBtn) tableBtn.className = 'px-2.5 py-1 rounded-md text-xs font-semibold bg-white text-slate-900 shadow-xs flex items-center gap-1 transition-all';
+    if (gridBtn) gridBtn.className = 'px-2.5 py-1 rounded-md text-xs font-semibold text-slate-600 hover:text-slate-900 flex items-center gap-1 transition-all';
+    tableWrap?.classList.remove('hidden');
+    gridWrap?.classList.add('hidden');
+  }
+  renderWinnerPins();
+}
+
+async function startWinnerPinsSearch(loadMore = false) {
+  if (state.winnerRunning) return;
+
+  const phrase = (document.getElementById('winnerKeywordInput')?.value || '').trim();
+  if (!phrase) {
+    alert('Please enter a keyword to search for Winner Pins.');
+    return;
+  }
+
+  readWinnerFilterFromControls();
+  syncWinnerFilterUI();
+
+  const scanCount = parseInt(document.getElementById('winnerScanCountSelect')?.value || '100', 10) || 100;
+  const searchIn = document.getElementById('winnerSearchInSelect')?.value || 'pins';
+  const country = document.getElementById('winnerCountrySelect')?.value || 'US';
+  const bookmarkToUse = loadMore && state.winnerQuery === phrase && state.winnerPinType === searchIn && state.winnerCountry === country ? state.winnerNextBookmark : '';
+
+  state.winnerQuery = phrase;
+  state.winnerPinType = searchIn;
+  state.winnerCountry = country;
+  state.winnerRunning = true;
+  state.winnerCancelled = false;
+  state.winnerAbortController = new AbortController();
+
+  if (!loadMore || !bookmarkToUse) {
+    state.winnerPins = [];
+    state.winnerNextBookmark = '';
+    state.winnerHasMore = false;
+    state.winnerRenderLimit = 200;
+    state.winnerCurrentSubquery = '';
+  }
+
+  const existingIds = new Set(state.winnerPins.map((p) => String(p.id || p['Pin ID'] || '')));
+
+  const searchBtn = document.getElementById('winnerSearchBtn');
+  const stopBtn = document.getElementById('winnerStopBtn');
+  const loadMoreBtn = document.getElementById('winnerLoadMoreBtn');
+  const progressBar = document.getElementById('winnerProgressBar');
+  const progressText = document.getElementById('winnerProgressText');
+
+  if (searchBtn) {
+    searchBtn.disabled = true;
+    searchBtn.classList.add('opacity-50', 'cursor-not-allowed');
+  }
+  if (stopBtn) {
+    stopBtn.disabled = false;
+    stopBtn.classList.remove('hidden');
+    stopBtn.classList.add('inline-flex');
+  }
+  if (loadMoreBtn) loadMoreBtn.disabled = true;
+  if (progressBar) progressBar.style.width = '2%';
+  if (progressText) {
+    progressText.textContent = loadMore
+      ? `Scanning next batch of pins for "${phrase}" (${country})...`
+      : `Harvesting pins for "${phrase}" [${country}] (target: ${scanCount.toLocaleString()})...`;
+  }
+
+  renderWinnerPins();
+
+  let lastRenderTs = 0;
+
+  try {
+    const params = new URLSearchParams({
+      query: phrase,
+      count: String(scanCount),
+      searchIn,
+      country,
+      stream: 'true',
+    });
+    if (bookmarkToUse) params.set('bookmark', bookmarkToUse);
+
+    const res = await fetch(`/api/winner-pins?${params.toString()}`, {
+      signal: state.winnerAbortController.signal,
+    });
+
+    if (!res.ok) {
+      throw new Error(`Server returned ${res.status}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split('\n\n');
+      buffer = events.pop();
+
+      for (const rawEv of events) {
+        if (!rawEv.trim() || !rawEv.startsWith('data: ')) continue;
+        try {
+          const ev = JSON.parse(rawEv.slice(6));
+          if (ev.type === 'start') {
+            if (progressText) progressText.textContent = `Searching Pinterest (${ev.country || country}) for "${ev.query}" (target: ${Number(ev.targetCount || scanCount).toLocaleString()} pins)...`;
+          } else if (ev.type === 'harvested') {
+            state.winnerNextBookmark = ev.nextBookmark || '';
+            state.winnerHasMore = Boolean(ev.hasMore);
+            if (state.winnerPins.length === 0 && progressText) {
+              progressText.textContent = `Scrolling "${phrase}" [${country}] — analyzing saves, dates & links...`;
+            }
+          } else if (ev.type === 'expanding') {
+            if (progressText) {
+              progressText.textContent = `Exact search reached Pinterest cap (${state.winnerPins.length.toLocaleString()} pins). Auto-expanding into related "${phrase}" [${country}] searches...`;
+            }
+          } else if (ev.type === 'subquery') {
+            state.winnerCurrentSubquery = ev.subquery || '';
+            const pct = ev.total > 0 ? Math.min(100, Math.round((ev.completed / ev.total) * 100)) : 0;
+            if (progressBar) progressBar.style.width = `${pct}%`;
+            if (progressText) {
+              progressText.textContent = `Expanding "${ev.subquery}" (${ev.subqueryIndex}/${ev.totalSubqueries}) • ${state.winnerPins.length.toLocaleString()}/${Number(ev.total).toLocaleString()} (${pct}%)`;
+            }
+          } else if (ev.type === 'pin' && ev.pin) {
+            const pid = String(ev.pin.id || ev.pin['Pin ID'] || '');
+            if (!pid || !existingIds.has(pid)) {
+              if (pid) existingIds.add(pid);
+              state.winnerPins.push(ev.pin);
+            }
+            const pct = ev.total > 0 ? Math.min(100, Math.round((ev.completed / ev.total) * 100)) : 0;
+            if (progressBar) progressBar.style.width = `${pct}%`;
+
+            const now = Date.now();
+            const throttleMs = state.winnerPins.length > 1000 ? 600 : 220;
+            if (now - lastRenderTs > throttleMs || ev.completed === ev.total) {
+              lastRenderTs = now;
+              const matchedCount = state.winnerPins.filter((p) => matchesWinnerPinType(p) && evaluateWinnerPin(p).matches).length;
+              const subNote = ev.subquery ? ` ["${ev.subquery}"]` : '';
+              if (progressText) {
+                progressText.textContent = `Scanning ${state.winnerPins.length.toLocaleString()}/${Number(ev.total).toLocaleString()} (${pct}%) [${country}]${subNote} — ${matchedCount.toLocaleString()} Winner Pin${matchedCount === 1 ? '' : 's'} matched`;
+              }
+              renderWinnerPins();
+            }
+          } else if (ev.type === 'done') {
+            state.winnerNextBookmark = ev.nextBookmark || state.winnerNextBookmark;
+            state.winnerHasMore = Boolean(ev.hasMore);
+            const matchedCount = state.winnerPins.filter((p) => matchesWinnerPinType(p) && evaluateWinnerPin(p).matches).length;
+            const expandedSuffix = ev.expandedQueriesUsed ? ` across ${ev.expandedQueriesUsed + 1} searches` : '';
+            if (progressBar) progressBar.style.width = '100%';
+            if (progressText) {
+              progressText.textContent = `Completed: ${matchedCount.toLocaleString()} Winner Pin${matchedCount === 1 ? '' : 's'} found out of ${state.winnerPins.length.toLocaleString()} scanned for "${phrase}" [${ev.country || country}]${expandedSuffix}`;
+            }
+          }
+        } catch (err) {
+          console.warn('Error parsing winner-pins SSE event:', err);
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name === 'AbortError' || state.winnerCancelled) {
+      const matchedCount = state.winnerPins.filter((p) => matchesWinnerPinType(p) && evaluateWinnerPin(p).matches).length;
+      if (progressText) {
+        progressText.textContent = `Stopped — ${matchedCount} Winner Pin${matchedCount === 1 ? '' : 's'} found from ${state.winnerPins.length} scanned`;
+      }
+    } else {
+      alert(`Winner Pin search failed: ${err.message}`);
+      if (progressText) progressText.textContent = `Error: ${err.message}`;
+    }
+  } finally {
+    state.winnerRunning = false;
+    state.winnerAbortController = null;
+    if (searchBtn) {
+      searchBtn.disabled = false;
+      searchBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+    }
+    if (stopBtn) {
+      stopBtn.disabled = true;
+      stopBtn.classList.add('hidden');
+      stopBtn.classList.remove('inline-flex');
+    }
+    if (loadMoreBtn) loadMoreBtn.disabled = false;
+    renderWinnerPins();
+  }
+}
+
+function stopWinnerPinsSearch() {
+  state.winnerCancelled = true;
+  if (state.winnerAbortController) {
+    state.winnerAbortController.abort();
+  }
+}
+
+function clearWinnerPins() {
+  if (state.winnerRunning) stopWinnerPinsSearch();
+  state.winnerPins = [];
+  state.winnerNextBookmark = '';
+  state.winnerHasMore = false;
+  const progressBar = document.getElementById('winnerProgressBar');
+  const progressText = document.getElementById('winnerProgressText');
+  if (progressBar) progressBar.style.width = '0%';
+  if (progressText) progressText.textContent = 'Enter a keyword and click Find Winner Pins';
+  renderWinnerPins();
+}
+
+function sendWinnerPinToPosition(pinId) {
+  if (!pinId) return;
+  switchTab('position');
+  const pinIdInput = document.getElementById('posPinIdInput');
+  const keywordInput = document.getElementById('posKeywordInput');
+  const posCountrySelect = document.getElementById('posCountrySelect');
+  if (pinIdInput) pinIdInput.value = cleanPinId(pinId);
+  if (keywordInput && state.winnerQuery) keywordInput.value = state.winnerQuery;
+  if (posCountrySelect && state.winnerCountry) {
+    posCountrySelect.value = state.winnerCountry;
+  }
+}
+
+function getProcessedWinnerPins() {
+  const f = state.winnerFilter;
+  const quickSearch = (document.getElementById('winnerQuickFilterInput')?.value || '').toLowerCase().trim();
+  const sortMode = document.getElementById('winnerSortSelect')?.value || 'saves_desc';
+
+  const typeFilteredPins = state.winnerPins.filter((p) => matchesWinnerPinType(p));
+  const evaluated = typeFilteredPins.map((p) => evaluateWinnerPin(p));
+  const totalScanned = evaluated.length;
+  const matchedAll = evaluated.filter((item) => item.matches);
+
+  let visible = evaluated;
+  if (f.enabled && f.action === 'hide') {
+    visible = matchedAll;
+  }
+
+  if (quickSearch) {
+    visible = visible.filter((item) => {
+      const p = item.pin;
+      const hay = `${p.title || p.Title || ''} ${p.domain || p.Domain || ''} ${p.pinnerUsername || p['Pinner Username'] || ''} ${p.boardName || p['Board Name'] || ''} ${item.link}`.toLowerCase();
+      return hay.includes(quickSearch);
+    });
+  }
+
+  visible = [...visible].sort((a, b) => {
+    // In dim mode, surface matching winners ahead of dimmed non-matching pins
+    if (f.enabled && f.action === 'dim' && a.matches !== b.matches) {
+      return a.matches ? -1 : 1;
+    }
+    if (sortMode === 'velocity_desc') {
+      return (b.savesPerDay ?? -1) - (a.savesPerDay ?? -1);
+    }
+    if (sortMode === 'newest') {
+      return (b.createdTs ?? 0) - (a.createdTs ?? 0);
+    }
+    if (sortMode === 'reactions_desc') {
+      return b.reactions - a.reactions;
+    }
+    if (sortMode === 'comments_desc') {
+      return b.comments - a.comments;
+    }
+    return b.saves - a.saves;
+  });
+
+  return { rawTotalScanned: state.winnerPins.length, totalScanned, matchedAll, visible };
+}
+
+function renderWinnerPins() {
+  const grid = document.getElementById('winnerPinsGrid');
+  const tbody = document.getElementById('winnerPinsTableBody');
+  const loadMoreWrap = document.getElementById('winnerLoadMoreWrap');
+  if (!grid || !tbody) return;
+
+  const f = state.winnerFilter;
+  const pinType = state.winnerPinType || document.getElementById('winnerSearchInSelect')?.value || 'pins';
+  const pinTypeLabel = pinType === 'exclude-videos' ? 'Exclude Video' : (pinType === 'videos' ? 'Videos Only' : 'All Pins');
+  const { rawTotalScanned, totalScanned, matchedAll, visible } = getProcessedWinnerPins();
+
+  // Update KPI stats
+  const statMatched = document.getElementById('winnerStatMatched');
+  const statScanned = document.getElementById('winnerStatScanned');
+  const statRate = document.getElementById('winnerStatRate');
+  const statAvgSaves = document.getElementById('winnerStatAvgSaves');
+  const showingText = document.getElementById('winnerShowingCountText');
+
+  if (statMatched) statMatched.textContent = matchedAll.length.toLocaleString();
+  if (statScanned) statScanned.textContent = totalScanned.toLocaleString();
+  if (statRate) {
+    const rate = totalScanned > 0 ? Math.round((matchedAll.length / totalScanned) * 100) : 0;
+    statRate.textContent = `${rate}%`;
+  }
+  if (statAvgSaves) {
+    const avg = matchedAll.length > 0
+      ? Math.round(matchedAll.reduce((acc, i) => acc + i.saves, 0) / matchedAll.length)
+      : 0;
+    statAvgSaves.textContent = avg.toLocaleString();
+  }
+  if (showingText) {
+    if (f.enabled && f.action === 'dim') {
+      showingText.textContent = `Showing ${visible.length} pins (${matchedAll.length} winners, ${Math.max(0, totalScanned - matchedAll.length)} dimmed)`;
+    } else {
+      showingText.textContent = `Showing ${visible.length} of ${totalScanned} scanned pins`;
+    }
+  }
+
+  // Toggle Load More button
+  if (loadMoreWrap) {
+    if (!state.winnerRunning && state.winnerHasMore && rawTotalScanned > 0) {
+      loadMoreWrap.classList.remove('hidden');
+    } else {
+      loadMoreWrap.classList.add('hidden');
+    }
+  }
+
+  // Empty state: nothing scanned yet
+  if (rawTotalScanned === 0) {
+    const emptyMsg = state.winnerRunning
+      ? `<div class="col-span-full bg-white rounded-2xl border border-slate-200 py-16 px-6 text-center space-y-3">
+           <i class="ph ph-spinner animate-spin text-3xl text-pink-600"></i>
+           <h3 class="text-sm font-bold text-slate-800">Scanning Pinterest for "${escapeHtml(state.winnerQuery)}"...</h3>
+           <p class="text-xs text-slate-500">Checking saves, creation dates, and external links in real time.</p>
+         </div>`
+      : `<div class="col-span-full bg-white rounded-2xl border border-dashed border-slate-300 py-16 px-6 text-center space-y-2.5">
+           <div class="w-14 h-14 mx-auto rounded-2xl bg-pink-50 text-pink-600 flex items-center justify-center">
+             <i class="ph-bold ph-trophy text-3xl"></i>
+           </div>
+           <h3 class="text-base font-bold text-slate-800">Discover Winner Pins for Any Keyword</h3>
+           <p class="text-xs text-slate-500 max-w-md mx-auto">Enter a keyword on the left and configure your Feed Filter (Minimum Saves, Created Within, Pin with Link) to isolate high-performing Pinterest pins.</p>
+         </div>`;
+    grid.innerHTML = emptyMsg;
+    tbody.innerHTML = `<tr><td colspan="9" class="py-12 text-center text-slate-400">${state.winnerRunning ? 'Scanning pins...' : 'No pins scanned yet.'}</td></tr>`;
+    return;
+  }
+
+  // Empty state: pins scanned, but 0 match the strict filter or Pin Type
+  if (visible.length === 0) {
+    const noMatchHtml = `
+      <div class="col-span-full bg-white rounded-2xl border border-slate-200 py-12 px-6 text-center space-y-3">
+        <div class="w-12 h-12 mx-auto rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center">
+          <i class="ph-bold ph-funnel-x text-2xl"></i>
+        </div>
+        <h3 class="text-sm font-bold text-slate-900">0 of ${rawTotalScanned} scanned pins matched your current filters</h3>
+        <p class="text-xs text-slate-500 max-w-lg mx-auto">
+          Pin Type: ${escapeHtml(pinTypeLabel)} • Saves ${f.minSaves > 0 ? `≥ ${f.minSaves.toLocaleString()}` : 'Any'} • Created ${f.maxDays > 0 ? `< ${f.maxDays} days` : 'All'} • Pin with Link: ${f.hasLink === 'yes' ? 'Yes' : f.hasLink === 'no' ? 'No' : 'All'}.
+          Adjust Pin Type or Feed Filter on the left to inspect results immediately, or run a fresh scan.
+        </p>
+        <div class="flex flex-wrap items-center justify-center gap-2 pt-1">
+          <button type="button" onclick="setWinnerFilterAction('dim')" class="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors">
+            Switch to Dim Non-Matching
+          </button>
+          <button type="button" onclick="setWinnerMaxDays(90)" class="px-3 py-1.5 rounded-lg bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 text-xs font-semibold transition-colors">
+            Expand to 90 Days
+          </button>
+          <button type="button" onclick="setWinnerMaxDays(0)" class="px-3 py-1.5 rounded-lg bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 text-xs font-semibold transition-colors">
+            Created Within: All
+          </button>
+          ${state.winnerHasMore && !state.winnerRunning ? `<button type="button" onclick="startWinnerPinsSearch(true)" class="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-semibold transition-colors">Scan More Pins</button>` : ''}
+        </div>
+      </div>`;
+    grid.innerHTML = noMatchHtml;
+    tbody.innerHTML = `<tr><td colspan="9" class="py-10 text-center text-slate-500">0 of ${totalScanned} scanned pins matched your current filter. Adjust the Feed Filter on the left.</td></tr>`;
+    return;
+  }
+
+  const renderCap = state.winnerRenderLimit || 200;
+  const displayed = visible.slice(0, renderCap);
+  const remainingHidden = Math.max(0, visible.length - displayed.length);
+
+  // Render Cards Grid View
+  if (state.winnerViewMode === 'grid') {
+    grid.innerHTML = displayed
+      .map((item) => {
+        const p = item.pin;
+        const imgUrl = getPinImageUrl(p, false);
+        const pinUrl = p.pinUrl || p.url || p['main link'] || `https://www.pinterest.com/pin/${p.id || p['Pin ID']}/`;
+        const pinId = String(p.id || p['Pin ID'] || '');
+        const title = p.title || p.Title || 'Untitled Pin';
+        const domain = p.domain && p.domain !== 'not-given' ? p.domain : '';
+        const ageLabel = formatWinnerAgeLabel(item.ageDays);
+        const createdText = p.created && p.created !== 'not-given' ? p.created : (p.Created && p.Created !== 'not-given' ? p.Created : '—');
+        const pinnerUser = p.pinnerUsername || (p['Pinner Username'] && p['Pinner Username'] !== 'not-given' ? p['Pinner Username'] : '');
+        const isDimmed = f.enabled && !item.matches && f.action === 'dim';
+        const velocityText = item.savesPerDay !== null ? `${item.savesPerDay >= 10 ? Math.round(item.savesPerDay) : item.savesPerDay.toFixed(1)}/day` : '—';
+
+        return `
+        <article class="bg-white rounded-2xl border ${item.matches && f.enabled ? 'border-pink-200/80 shadow-xs hover:shadow-md' : 'border-slate-200'} overflow-hidden flex flex-col transition-all ${isDimmed ? 'opacity-35 grayscale-[45%] hover:opacity-75' : ''}">
+          <!-- Pin Visual Preview -->
+          <div class="relative bg-slate-100 aspect-[3/4] overflow-hidden group">
+            ${
+              imgUrl
+                ? `<a href="${escapeHtml(pinUrl)}" target="_blank" rel="noopener noreferrer" class="block w-full h-full">
+                     <img src="${escapeHtml(imgUrl)}" alt="${escapeQuotes(title)}" loading="lazy" class="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300">
+                   </a>`
+                : `<div class="w-full h-full flex items-center justify-center text-slate-400 text-xs">No image</div>`
+            }
+
+            <!-- Top Left: Saves / Winner Badge -->
+            <div class="absolute top-2.5 left-2.5 flex items-center gap-1">
+              ${
+                item.matches
+                  ? `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-pink-600/95 text-white text-[11px] font-bold shadow-sm backdrop-blur-xs">
+                       <i class="ph-fill ph-trophy text-amber-300"></i> ${item.saves.toLocaleString()} saves
+                     </span>`
+                  : `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-900/80 text-white text-[10px] font-semibold backdrop-blur-xs">
+                       ${item.saves.toLocaleString()} saves
+                     </span>`
+              }
+            </div>
+
+            <!-- Top Right: Age & Media Badges -->
+            <div class="absolute top-2.5 right-2.5 flex flex-col items-end gap-1">
+              <span class="px-2 py-0.5 rounded-md bg-slate-900/75 text-white text-[10px] font-semibold backdrop-blur-xs" title="Created: ${escapeQuotes(createdText)}">
+                ${escapeHtml(ageLabel)}
+              </span>
+              ${item.isVideo ? `<span class="px-1.5 py-0.5 rounded-md bg-red-600/90 text-white text-[10px] font-bold"><i class="ph-fill ph-play"></i> Video</span>` : ''}
+            </div>
+
+            <!-- Bottom Left: Destination Link Pill -->
+            ${
+              item.hasLink
+                ? `<a href="${escapeHtml(item.link)}" target="_blank" rel="noopener noreferrer" title="${escapeQuotes(item.link)}" class="absolute bottom-2.5 left-2.5 right-2.5 max-w-max truncate inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/95 hover:bg-white text-slate-800 text-[11px] font-semibold shadow-sm backdrop-blur-xs transition-colors">
+                     <i class="ph-bold ph-arrow-up-right text-blue-600 shrink-0"></i>
+                     <span class="truncate max-w-[180px]">${escapeHtml(domain || item.link)}</span>
+                   </a>`
+                : `<span class="absolute bottom-2.5 left-2.5 inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-800/70 text-slate-200 text-[10px] font-medium">
+                     No external link
+                   </span>`
+            }
+          </div>
+
+          <!-- Card Body -->
+          <div class="p-3.5 flex-1 flex flex-col justify-between gap-2.5">
+            <div class="space-y-1.5">
+              ${
+                isDimmed && item.reasons.length > 0
+                  ? `<div class="flex flex-wrap gap-1">
+                       ${item.reasons.map((r) => `<span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-semibold">${escapeHtml(r)}</span>`).join('')}
+                     </div>`
+                  : ''
+              }
+              <a href="${escapeHtml(pinUrl)}" target="_blank" rel="noopener noreferrer" class="block text-xs font-bold text-slate-900 hover:text-red-600 line-clamp-2 leading-snug" title="${escapeQuotes(title)}">
+                ${escapeHtml(title)}
+              </a>
+              <div class="text-[11px] text-slate-500 flex items-center justify-between gap-2">
+                <span class="truncate">${pinnerUser ? `@${escapeHtml(pinnerUser)}` : 'Pinterest Pin'}</span>
+                <span class="font-mono text-[10px] text-slate-400 shrink-0" title="${escapeQuotes(createdText)}">${escapeHtml(ageLabel)}</span>
+              </div>
+            </div>
+
+            <!-- Metrics Strip -->
+            <div class="grid grid-cols-3 gap-1.5 pt-2 border-t border-slate-100 text-center">
+              <div class="bg-slate-50 rounded-lg py-1 px-1">
+                <div class="text-[10px] text-slate-400 font-medium">Velocity</div>
+                <div class="text-[11px] font-bold text-emerald-700 font-mono">${escapeHtml(velocityText)}</div>
+              </div>
+              <div class="bg-slate-50 rounded-lg py-1 px-1">
+                <div class="text-[10px] text-slate-400 font-medium">Reactions</div>
+                <div class="text-[11px] font-bold text-slate-800 font-mono">${item.reactions.toLocaleString()}</div>
+              </div>
+              <div class="bg-slate-50 rounded-lg py-1 px-1">
+                <div class="text-[10px] text-slate-400 font-medium">Comments</div>
+                <div class="text-[11px] font-bold text-slate-800 font-mono">${item.comments.toLocaleString()}</div>
+              </div>
+            </div>
+
+            <!-- Footer Actions -->
+            <div class="flex items-center justify-between gap-1.5 pt-1">
+              <a href="${escapeHtml(pinUrl)}" target="_blank" rel="noopener noreferrer" class="flex-1 py-1.5 px-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold text-center transition-colors">
+                View Pin
+              </a>
+              ${
+                item.hasLink
+                  ? `<a href="${escapeHtml(item.link)}" target="_blank" rel="noopener noreferrer" class="py-1.5 px-2.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 text-[11px] font-semibold transition-colors" title="Visit destination link">
+                       <i class="ph-bold ph-link"></i>
+                     </a>`
+                  : ''
+              }
+              <button type="button" onclick="sendWinnerPinToPosition('${escapeQuotes(pinId)}')" class="py-1.5 px-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs transition-colors" title="Track rank in Position Tracker">
+                <i class="ph ph-crosshair"></i>
+              </button>
+              <button type="button" onclick="bookmarkWinnerPin('${escapeQuotes(pinId)}')" class="py-1.5 px-2 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-600 text-xs transition-colors" title="Bookmark Winner Pin">
+                <i class="ph-fill ph-star"></i>
+              </button>
+            </div>
+          </div>
+        </article>
+      `;
+      })
+      .join('') + (remainingHidden > 0
+        ? `<div class="col-span-full flex justify-center py-3">
+             <button type="button" onclick="showMoreWinnerRendered()" class="px-5 py-2.5 rounded-xl bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 text-xs font-bold transition-colors">
+               Show More Results (${displayed.length.toLocaleString()} of ${visible.length.toLocaleString()} shown — +${Math.min(200, remainingHidden)} more)
+             </button>
+           </div>`
+        : '');
+  }
+
+  // Render Table View
+  if (state.winnerViewMode === 'table') {
+    tbody.innerHTML = displayed
+      .map((item, idx) => {
+        const p = item.pin;
+        const imgUrl = getPinImageUrl(p, true);
+        const pinUrl = p.pinUrl || p.url || p['main link'] || `https://www.pinterest.com/pin/${p.id || p['Pin ID']}/`;
+        const pinId = String(p.id || p['Pin ID'] || '');
+        const title = p.title || p.Title || 'Untitled Pin';
+        const domain = p.domain && p.domain !== 'not-given' ? p.domain : '';
+        const ageLabel = formatWinnerAgeLabel(item.ageDays);
+        const createdText = p.created && p.created !== 'not-given' ? p.created : (p.Created && p.Created !== 'not-given' ? p.Created : '—');
+        const isDimmed = f.enabled && !item.matches && f.action === 'dim';
+        const velocityText = item.savesPerDay !== null ? `${item.savesPerDay >= 10 ? Math.round(item.savesPerDay) : item.savesPerDay.toFixed(1)}/d` : '—';
+
+        return `
+        <tr class="hover:bg-slate-50 transition-colors ${isDimmed ? 'opacity-40 bg-slate-50/50' : ''}">
+          <td class="py-2 px-3 text-center font-mono text-slate-500">${idx + 1}</td>
+          <td class="py-2 px-3 text-center">
+            ${
+              imgUrl
+                ? `<a href="${escapeHtml(pinUrl)}" target="_blank" rel="noopener noreferrer" class="inline-block w-11 h-14 rounded-lg overflow-hidden bg-slate-100 border border-slate-200">
+                     <img src="${escapeHtml(imgUrl)}" alt="" loading="lazy" class="w-full h-full object-cover">
+                   </a>`
+                : `<span class="text-[10px] text-slate-400">—</span>`
+            }
+          </td>
+          <td class="py-2 px-3 max-w-xs">
+            <div class="space-y-1">
+              <div class="flex items-center gap-1.5 flex-wrap">
+                ${
+                  item.matches
+                    ? `<span class="px-1.5 py-0.5 rounded bg-pink-100 text-pink-700 text-[10px] font-bold">WINNER</span>`
+                    : `<span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 text-[10px] font-semibold">${escapeHtml(item.reasons.join(', ') || 'Filtered')}</span>`
+                }
+                ${item.isVideo ? `<span class="px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-bold inline-flex items-center gap-0.5"><i class="ph-fill ph-play"></i> VIDEO</span>` : ''}
+                <a href="${escapeHtml(pinUrl)}" target="_blank" rel="noopener noreferrer" class="font-semibold text-slate-900 hover:text-red-600 truncate max-w-[260px]" title="${escapeQuotes(title)}">
+                  ${escapeHtml(title)}
+                </a>
+              </div>
+              <div class="text-[10px] text-slate-400 font-mono">ID: ${escapeHtml(pinId)}</div>
+            </div>
+          </td>
+          <td class="py-2 px-3 text-center font-mono font-bold text-pink-600">${item.saves.toLocaleString()}</td>
+          <td class="py-2 px-3 text-center font-mono font-semibold text-emerald-700">${escapeHtml(velocityText)}</td>
+          <td class="py-2 px-3 text-center whitespace-nowrap">
+            <div class="font-semibold text-slate-700">${escapeHtml(ageLabel)}</div>
+            <div class="text-[10px] text-slate-400">${escapeHtml(createdText)}</div>
+          </td>
+          <td class="py-2 px-3 max-w-[220px]">
+            ${
+              item.hasLink
+                ? `<a href="${escapeHtml(item.link)}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline font-medium truncate block max-w-[210px]" title="${escapeQuotes(item.link)}">${escapeHtml(domain || item.link)}</a>`
+                : `<span class="text-slate-400">No link</span>`
+            }
+          </td>
+          <td class="py-2 px-3 text-center font-mono text-slate-700">${item.reactions.toLocaleString()}</td>
+          <td class="py-2 px-3 text-right whitespace-nowrap space-x-1">
+            <button type="button" onclick="sendWinnerPinToPosition('${escapeQuotes(pinId)}')" class="p-1.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-600" title="Position Tracker">
+              <i class="ph ph-crosshair"></i>
+            </button>
+            <button type="button" onclick="bookmarkWinnerPin('${escapeQuotes(pinId)}')" class="p-1.5 rounded bg-amber-50 hover:bg-amber-100 text-amber-600" title="Bookmark">
+              <i class="ph-fill ph-star"></i>
+            </button>
+            <a href="${escapeHtml(pinUrl)}" target="_blank" rel="noopener noreferrer" class="inline-flex p-1.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-600" title="Open on Pinterest">
+              <i class="ph ph-arrow-square-out"></i>
+            </a>
+          </td>
+        </tr>
+      `;
+      })
+      .join('') + (remainingHidden > 0
+        ? `<tr><td colspan="9" class="py-3 text-center bg-slate-50">
+             <button type="button" onclick="showMoreWinnerRendered()" class="px-4 py-1.5 rounded-lg bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 text-xs font-bold transition-colors">
+               Show More Rows (${displayed.length.toLocaleString()} of ${visible.length.toLocaleString()} shown — +${Math.min(200, remainingHidden)} more)
+             </button>
+           </td></tr>`
+        : '');
+  }
+}
+
+function exportWinnerPinsCSV() {
+  const { visible } = getProcessedWinnerPins();
+  const toExport = state.winnerFilter.enabled
+    ? visible.filter((item) => item.matches)
+    : visible;
+
+  if (!toExport || toExport.length === 0) {
+    alert('No Winner Pins to export.');
+    return;
+  }
+
+  const headers = [
+    'Rank',
+    'Pin ID',
+    'Title',
+    'Saves',
+    'Saves Per Day',
+    'Created',
+    'Age (Days)',
+    'Has Link',
+    'Destination Link',
+    'Domain',
+    'Reactions',
+    'Comments',
+    'Pinner Username',
+    'Board Name',
+    'Pin URL',
+    'Image URL',
+  ];
+
+  const rows = [
+    headers.join(','),
+    ...toExport.map((item, idx) => {
+      const p = item.pin;
+      const pinId = String(p.id || p['Pin ID'] || '');
+      const title = p.title || p.Title || '';
+      const created = p.created || p.Created || '';
+      const domain = p.domain && p.domain !== 'not-given' ? p.domain : '';
+      const pinUrl = p.pinUrl || p.url || p['main link'] || '';
+      const imgUrl = getPinImageUrl(p, false);
+      const pinner = p.pinnerUsername || (p['Pinner Username'] !== 'not-given' ? p['Pinner Username'] : '') || '';
+      const board = p.boardName || (p['Board Name'] !== 'not-given' ? p['Board Name'] : '') || '';
+      const cols = [
+        idx + 1,
+        pinId,
+        title,
+        item.saves,
+        item.savesPerDay !== null ? item.savesPerDay.toFixed(2) : '',
+        created,
+        item.ageDays !== null ? Math.round(item.ageDays) : '',
+        item.hasLink ? 'YES' : 'NO',
+        item.link,
+        domain,
+        item.reactions,
+        item.comments,
+        pinner,
+        board,
+        pinUrl,
+        imgUrl,
+      ];
+      return cols.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',');
+    }),
+  ];
+
+  const safeQuery = (state.winnerQuery || 'pins').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40);
+  downloadFile(`winner_pins_${safeQuery}_${Date.now()}.csv`, rows.join('\n'), 'text/csv;charset=utf-8;');
+}
+
 
 
 
