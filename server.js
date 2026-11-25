@@ -919,9 +919,11 @@ function matchesWinnerFilter(pin, { minSaves = 0, maxDays = 0, hasLink = 'all', 
   return true;
 }
 
-// Expand a seed keyword into related Pinterest search queries via Typeahead
-// so 1k / 5k / 10k scans can surpass Pinterest's ~950-pin cap per exact query
-async function getExpandedWinnerQueries(baseQuery, session, countryConfig = null) {
+// Expand a seed keyword into hundreds of high-signal Pinterest search queries
+// using multi-tier expansion (direct typeahead, long-tail sub-phrases + typeahead,
+// mined visual annotations from Phase-1 pins, and broad modifiers) so 1k / 5k / 10k
+// scans complete reliably even for ultra-specific 4–6 word long-tail keywords.
+async function getExpandedWinnerQueries(baseQuery, session, countryConfig = null, annotationCounts = null) {
   const cachePrefix = countryConfig ? `${countryConfig.code}:` : '';
   const fetchSuggestions = async (term) => {
     const cacheKey = `${cachePrefix}${term}`;
@@ -939,7 +941,7 @@ async function getExpandedWinnerQueries(baseQuery, session, countryConfig = null
         `https://www.pinterest.com/resource/AdvancedTypeaheadResource/get/?${params.toString()}`,
         {
           headers: getLocalizedRequestHeaders(session, sourceUrl, countryConfig),
-          signal: AbortSignal.timeout(8000),
+          signal: AbortSignal.timeout(7000),
         }
       );
       if (!response.ok) return [];
@@ -954,33 +956,147 @@ async function getExpandedWinnerQueries(baseQuery, session, countryConfig = null
     }
   };
 
-  const letters = 'abcdefghijklmnopqrstuvwxyz'.split('');
-  const seedTerms = [baseQuery, ...letters.map((ch) => `${baseQuery} ${ch}`)];
-  const batches = await runWorkerPool(seedTerms, 10, fetchSuggestions);
-
   const seenLower = new Set([baseQuery.toLowerCase().trim()]);
   const expanded = [];
-  for (const list of batches) {
-    if (!Array.isArray(list)) continue;
-    for (const q of list) {
-      const lower = q.toLowerCase();
-      if (q && !seenLower.has(lower)) {
-        seenLower.add(lower);
-        expanded.push(q);
+  const addCandidate = (q) => {
+    if (!q || typeof q !== 'string') return;
+    const clean = q.replace(/\s+/g, ' ').trim();
+    if (clean.length < 2) return;
+    const lower = clean.toLowerCase();
+    if (!seenLower.has(lower)) {
+      seenLower.add(lower);
+      expanded.push(clean);
+    }
+  };
+
+  const words = baseQuery
+    .replace(/[^\p{L}\p{N}\s'-]+/gu, ' ')
+    .split(/\s+/)
+    .map((w) => w.trim())
+    .filter(Boolean);
+
+  // Tier 1: Direct typeahead on exact query
+  const directHits = await fetchSuggestions(baseQuery);
+  for (const q of directHits) addCandidate(q);
+
+  const letters = 'abcdefghijklmnopqrstuvwxyz'.split('');
+  if (words.length <= 3 || directHits.length > 0) {
+    const exactAlphaTerms = letters.map((ch) => `${baseQuery} ${ch}`);
+    const exactBatches = await runWorkerPool(exactAlphaTerms, 12, fetchSuggestions);
+    for (const list of exactBatches) {
+      if (Array.isArray(list)) list.forEach(addCandidate);
+    }
+  }
+
+  // Tier 2: Long-tail sub-phrase extraction + sub-phrase typeahead (crucial for 3+ word queries)
+  const subPhrases = [];
+  const subSeen = new Set([baseQuery.toLowerCase().trim()]);
+  const pushSubPhrase = (p) => {
+    const clean = p.replace(/\s+/g, ' ').trim();
+    const low = clean.toLowerCase();
+    if (clean.length >= 3 && !subSeen.has(low)) {
+      subSeen.add(low);
+      subPhrases.push(clean);
+    }
+  };
+
+  if (words.length >= 4) {
+    // Drop-1-word variations (prioritize dropping leading adjectives like "Mint")
+    for (let skip = 0; skip < words.length; skip++) {
+      pushSubPhrase(words.filter((_, idx) => idx !== skip).join(' '));
+    }
+    // Contiguous 3-word windows (right-to-left first since core nouns are usually at the end)
+    for (let i = words.length - 3; i >= 0; i--) {
+      pushSubPhrase(words.slice(i, i + 3).join(' '));
+    }
+    // Contiguous 2-word windows (right-to-left first)
+    for (let i = words.length - 2; i >= 0; i--) {
+      pushSubPhrase(words.slice(i, i + 2).join(' '));
+    }
+    // High-value non-contiguous noun pairs (e.g., "moth cape", "luna cape")
+    const lastWord = words[words.length - 1];
+    for (let i = words.length - 3; i >= 0; i--) {
+      pushSubPhrase(`${words[i]} ${lastWord}`);
+    }
+  } else if (words.length === 3) {
+    pushSubPhrase(`${words[1]} ${words[2]}`);
+    pushSubPhrase(`${words[0]} ${words[1]}`);
+    pushSubPhrase(`${words[0]} ${words[2]}`);
+  } else if (words.length === 2) {
+    pushSubPhrase(`${words[1]} ${words[0]}`);
+  }
+
+  // Add core sub-phrases directly and fetch Pinterest Typeahead for the top sub-phrases
+  for (const sp of subPhrases) addCandidate(sp);
+
+  if (subPhrases.length > 0) {
+    const topSubSeeds = subPhrases.slice(0, 12);
+    const subBatches = await runWorkerPool(topSubSeeds, 10, fetchSuggestions);
+    let bestAlphaSeed = '';
+    let bestAlphaCount = 0;
+
+    for (let i = 0; i < subBatches.length; i++) {
+      const list = subBatches[i];
+      if (!Array.isArray(list)) continue;
+      list.forEach(addCandidate);
+      if (list.length > bestAlphaCount) {
+        bestAlphaCount = list.length;
+        bestAlphaSeed = topSubSeeds[i];
+      }
+    }
+
+    // Run a-z typeahead on up to 2 highest-yield sub-phrases (especially when exact query had 0 hits)
+    const alphaCandidates = [];
+    if (bestAlphaSeed) alphaCandidates.push(bestAlphaSeed);
+    for (let i = 0; i < subBatches.length && alphaCandidates.length < 2; i++) {
+      if (Array.isArray(subBatches[i]) && subBatches[i].length >= 4 && !alphaCandidates.includes(topSubSeeds[i])) {
+        alphaCandidates.push(topSubSeeds[i]);
+      }
+    }
+    if (alphaCandidates.length > 0 && expanded.length < 180) {
+      const alphaTerms = [];
+      for (const seed of alphaCandidates) {
+        for (const ch of letters) alphaTerms.push(`${seed} ${ch}`);
+      }
+      const alphaBatches = await runWorkerPool(alphaTerms, 12, fetchSuggestions);
+      for (const list of alphaBatches) {
+        if (Array.isArray(list)) list.forEach(addCandidate);
       }
     }
   }
 
-  // Fallback broad modifiers if Pinterest typeahead returns few variations
+  // Tier 3: Mined Visual Annotations from already-scanned Phase-1 pins (Pinterest's own niche graph!)
+  if (annotationCounts && annotationCounts.size > 0) {
+    const sortedAnnotations = [...annotationCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([term]) => term);
+
+    const coreAnchor = words.length >= 2 ? words.slice(-2).join(' ') : baseQuery;
+    for (const ann of sortedAnnotations.slice(0, 70)) {
+      addCandidate(ann);
+      if (ann.split(/\s+/).length <= 2 && !ann.toLowerCase().includes(words[words.length - 1]?.toLowerCase() || '')) {
+        addCandidate(`${ann} ${coreAnchor}`);
+      }
+    }
+  }
+
+  // Tier 4: Rich modifiers applied to the full query & top core sub-phrases
   const fallbackMods = [
-    'aesthetic', 'modern', 'cozy', 'simple', 'inspiration', 'design',
-    'diy', 'small', 'minimalist', 'luxury', 'trending', 'best', 'decor', 'tips', 'style'
+    'pattern', 'free pattern', 'tutorial', 'diy', 'handmade', 'ideas',
+    'aesthetic', 'inspiration', 'design', 'outfit', 'style', 'fairy',
+    'cottagecore', 'boho', 'vintage', 'pastel', 'fantasy', 'craft',
+    'art', 'cozy', 'modern', 'minimalist', 'luxury', 'unique',
+    'cute', 'easy', 'beginner', 'trending', 'best', 'gift',
+    'shop', 'decor', 'tips', '2025', '2026', 'green', 'blue', 'black', 'purple'
   ];
+
+  const modBases = words.length <= 3
+    ? [baseQuery, ...subPhrases.slice(0, 2)]
+    : [...subPhrases.slice(0, 4), baseQuery];
+
   for (const mod of fallbackMods) {
-    const candidate = `${baseQuery} ${mod}`;
-    if (!seenLower.has(candidate.toLowerCase())) {
-      seenLower.add(candidate.toLowerCase());
-      expanded.push(candidate);
+    for (const mb of modBases) {
+      addCandidate(`${mb} ${mod}`);
     }
   }
 
@@ -1017,6 +1133,17 @@ app.get('/api/winner-pins', async (req, res) => {
       return true;
     };
 
+    const recordPinAnnotations = (pin, annMap) => {
+      const raw = pin?.Annotations || pin?.annotations || '';
+      if (!raw || typeof raw !== 'string' || raw === 'not-given') return;
+      for (const part of raw.split(',')) {
+        const clean = part.trim();
+        if (clean.length >= 3 && clean.length <= 45) {
+          annMap.set(clean, (annMap.get(clean) || 0) + 1);
+        }
+      }
+    };
+
     const session = await getPinterestSession();
 
     if (stream) {
@@ -1043,17 +1170,19 @@ app.get('/api/winner-pins', async (req, res) => {
       let currentBookmark = startBookmark;
       let primaryHasMore = true;
       const seenPinIds = new Set();
+      const annotationCounts = new Map();
       const batchSize = targetCount > 150 ? 100 : targetCount;
-      const concurrency = targetCount >= 1000 ? 16 : 12;
+      const concurrency = targetCount >= 2000 ? 20 : (targetCount >= 1000 ? 16 : 12);
 
       const scanQueryFeed = async (activeQuery, initialBookmark, isExpanded, subIdx, totalSubs) => {
         let bm = initialBookmark || '';
         let feedHasMore = true;
+        let zeroMatchBatches = 0;
 
         while (scanned < targetCount && feedHasMore && !clientDisconnected) {
           const remaining = targetCount - scanned;
           const harvestCount = isExcludeVideos
-            ? Math.min(batchSize + 25, Math.max(25, Math.ceil(remaining * 1.35)))
+            ? Math.min(batchSize + 30, Math.max(25, Math.ceil(remaining * 1.4)))
             : Math.min(batchSize, remaining);
           const batch = await harvestNumericPinIdsWithCursor(
             activeQuery,
@@ -1081,6 +1210,7 @@ app.get('/api/winner-pins', async (req, res) => {
             res.write(`data: ${JSON.stringify({ type: 'harvested', total: expectedTotal, batchSize: idsToScan.length, nextBookmark: bm, hasMore: feedHasMore })}\n\n`);
           }
 
+          const scannedBeforeBatch = scanned;
           let currentIndex = 0;
           const worker = async () => {
             while (currentIndex < idsToScan.length && scanned < targetCount && !clientDisconnected) {
@@ -1089,6 +1219,7 @@ app.get('/api/winner-pins', async (req, res) => {
               try {
                 const pin = await fetchPinDeepDetails(pinId, session);
                 if (!clientDisconnected && pin && scanned < targetCount) {
+                  recordPinAnnotations(pin, annotationCounts);
                   if (!matchesPinType(pin)) continue;
                   scanned++;
                   res.write(`data: ${JSON.stringify({
@@ -1110,6 +1241,13 @@ app.get('/api/winner-pins', async (req, res) => {
 
           const workers = Array.from({ length: Math.min(concurrency, idsToScan.length) }, () => worker());
           await Promise.all(workers);
+
+          if (scanned === scannedBeforeBatch) {
+            zeroMatchBatches++;
+            if (isExpanded && zeroMatchBatches >= 2) break;
+          } else {
+            zeroMatchBatches = 0;
+          }
         }
 
         return { nextBookmark: bm, hasMore: feedHasMore };
@@ -1120,9 +1258,11 @@ app.get('/api/winner-pins', async (req, res) => {
       currentBookmark = primaryResult.nextBookmark;
       primaryHasMore = primaryResult.hasMore;
 
-      // Phase 2: If targetCount wasn't reached (Pinterest caps a single query at ~950 pins),
-      // automatically expand into related Pinterest searches until targetCount is reached
+      // Phase 2: If targetCount wasn't reached (Pinterest caps a single query or long-tail query has <5k pins),
+      // automatically expand into related Pinterest searches, sub-phrases, and mined visual annotations
       let expandedUsed = 0;
+      const triedQueries = new Set([query.toLowerCase()]);
+
       if (scanned < targetCount && !clientDisconnected) {
         res.write(`data: ${JSON.stringify({
           type: 'expanding',
@@ -1131,22 +1271,52 @@ app.get('/api/winner-pins', async (req, res) => {
           query,
         })}\n\n`);
 
-        const subqueries = await getExpandedWinnerQueries(query, session, countryConfig);
+        const subqueries = await getExpandedWinnerQueries(query, session, countryConfig, annotationCounts);
         const totalSubs = subqueries.length;
 
         for (let i = 0; i < subqueries.length && scanned < targetCount && !clientDisconnected; i++) {
           const sq = subqueries[i];
-          expandedUsed = i + 1;
+          if (triedQueries.has(sq.toLowerCase())) continue;
+          triedQueries.add(sq.toLowerCase());
+          expandedUsed++;
+
           res.write(`data: ${JSON.stringify({
             type: 'subquery',
             subquery: sq,
-            subqueryIndex: i + 1,
+            subqueryIndex: expandedUsed,
             totalSubqueries: totalSubs,
             completed: scanned,
             total: targetCount,
           })}\n\n`);
 
-          await scanQueryFeed(sq, '', true, i + 1, totalSubs);
+          await scanQueryFeed(sq, '', true, expandedUsed, totalSubs);
+        }
+
+        // Wave 2: If still below targetCount (e.g. 10k scan on a rare niche), expand newly mined annotations
+        if (scanned < targetCount && !clientDisconnected && annotationCounts.size > 0) {
+          const wave2Terms = [...annotationCounts.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .map(([term]) => term)
+            .filter((term) => !triedQueries.has(term.toLowerCase()))
+            .slice(0, 120);
+
+          const wave2Total = expandedUsed + wave2Terms.length;
+          for (let i = 0; i < wave2Terms.length && scanned < targetCount && !clientDisconnected; i++) {
+            const sq = wave2Terms[i];
+            triedQueries.add(sq.toLowerCase());
+            expandedUsed++;
+
+            res.write(`data: ${JSON.stringify({
+              type: 'subquery',
+              subquery: sq,
+              subqueryIndex: expandedUsed,
+              totalSubqueries: wave2Total,
+              completed: scanned,
+              total: targetCount,
+            })}\n\n`);
+
+            await scanQueryFeed(sq, '', true, expandedUsed, wave2Total);
+          }
         }
       }
 
